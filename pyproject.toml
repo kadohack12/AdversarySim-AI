@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adversarysim-ai"
+version = "0.1.0"
+description = "Lightweight, safety-first AI assistant for purple teaming and adversary emulation with Sliver C2."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "kadohack12" }]
+keywords = ["purple-team", "adversary-emulation", "sliver", "c2", "security", "ollama", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.0,<3.0",
+    "rich>=13.7",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+adversarysim = "adversary_sim.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kadohack12/AdversarySim-AI"
+Issues = "https://github.com/kadohack12/AdversarySim-AI/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adversary_sim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Captured sliver-client console output is verbatim and inherently wide.
+"tests/test_sliver.py" = ["E501"]
