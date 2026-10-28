@@ -1,7 +1,7 @@
 # AdversarySim-AI
 
 ![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
-![Tests](https://img.shields.io/badge/tests-102%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-130%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Zero Telemetry](https://img.shields.io/badge/telemetry-zero-blueviolet)
 
@@ -80,7 +80,7 @@ work is powerful, so it needs guardrails. AdversarySim-AI is built around three 
 | Risk level      | Examples                        | Default on Enter |
 | --------------- | ------------------------------- | ---------------- |
 | `read-only`     | list sessions, beacons, jobs    | **allow** `[Y/n]` |
-| `state-changing`| run a command, modify state     | **deny** `[y/N]`  |
+| `state-changing`| run a discovery command, modify state | **deny** `[y/N]`  |
 | `destructive`   | generate / deploy an implant    | **deny** `[y/N]`  |
 
 Two environment switches make automation and audits easier:
@@ -89,19 +89,26 @@ Two environment switches make automation and audits easier:
 - `ADVERSARYSIM_ASSUME_YES=true` — auto-approve (use only in a sandbox you fully control).
 
 Interactive implant control (`interact`, `shell`, `execute`) is **deliberately out of scope**.
-AdversarySim-AI enumerates and generates; it does not drive live implants.
+AdversarySim-AI enumerates, generates, and runs a narrow allow-list of read-only discovery commands
+on an already-established session. It does not provide a general-purpose remote command runner.
 
 ---
 
 ## Features
 
 - **Native Sliver C2 integration** — `sliver_status`, `sliver_list_sessions`,
-  `sliver_list_beacons`, `sliver_list_jobs`, `sliver_generate_payload`.
+  `sliver_list_beacons`, `sliver_list_jobs`, `sliver_generate_payload`,
+  `sliver_run_discovery`.
 - **Local LLM connector** — async client for Ollama's `/api/chat` (streaming and non-streaming),
   defaulting to `qwen2.5-coder:7b`.
 - **LLM tool calling** — the local model can invoke the read-only Sliver tools
-  (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`)
-  directly from the interactive shell, with every call routed through the Safety Gate.
+  (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`) plus the
+  allow-listed discovery tool (`sliver_run_discovery`) directly from the interactive shell, with
+  every call routed through the Safety Gate.
+- **Defensible discovery (MITRE T1082)** — `sliver_run_discovery` emulates System Information
+  Discovery using a strict read-only allow-list (`whoami`, `id`, `uname -a`, `hostname`, `uptime`).
+  Anything else is refused before it reaches the target, and the action is `state-changing`
+  (`[y/N]`).
 - **Human-in-the-loop safety layer** — a single approval gate that every action goes through.
 - **Modern terminal UI** — a `rich` banner, colourised tables for sessions and jobs, and an
   interactive shell with slash commands.
@@ -157,14 +164,15 @@ You can ask it to summarise the current state — "how many beacons are checking
 and over which transport?" — and it reasons over the same data the CLI exposes.
 
 Through **Ollama tool calling**, the model can go further than narrating: when a
-question needs live data, it requests the matching read-only Sliver tool
+question needs live data, it requests the matching Sliver tool
 (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`)
-by name. AdversarySim intercepts that request, runs it through the Safety Gate for
-`[Y/n]` approval, executes the Sliver function, and feeds the real output back so
-the model can answer precisely. Detection is robust: it accepts both the
-structured `tool_calls` field and a tool invocation the model emits as raw JSON in
-its text (e.g. `{"name": "sliver_list_beacons", "arguments": {}}`), so the call is
-never merely echoed back:
+or a defensible discovery command (`sliver_run_discovery`) by name. AdversarySim
+intercepts that request, runs it through the Safety Gate for approval, executes
+the Sliver function, and feeds the real output back so the model can answer
+precisely. Detection is robust: it accepts both the structured `tool_calls` field
+and a tool invocation the model emits as raw JSON in its text (e.g.
+`{"name": "sliver_list_beacons", "arguments": {}}`), so the call is never merely
+echoed back:
 
 ```text
 adversarysim> Sur quelle machine se trouve mon implant ?
@@ -174,6 +182,14 @@ adversarysim> Sur quelle machine se trouve mon implant ?
   risk: read-only
 Proceed? [Y/n] y
 Ton implant tourne sur target-node (transport mtls).
+
+adversarysim> Qui est l'utilisateur sur la session ?
+→ model requested tool sliver_run_discovery
+  Run Sliver tool 'sliver_run_discovery' requested by the local model
+  command: sliver_run_discovery session_id='ab12cd34' command='whoami'
+  risk: state-changing
+Proceed? [y/N] y
+L'utilisateur de la session ab12cd34 est root.
 ```
 
 It **coexists with the slash shortcuts** rather than replacing them: `/status`,
@@ -193,8 +209,15 @@ calling, it can only *request* a tool by name — AdversarySim intercepts the ca
 and routes it through the [Safety Gate](#safety-model) for explicit human
 approval before the Sliver function runs. The model has no ability to run a
 system command, generate a payload, or drive a C2 channel on its own, and it
-cannot invoke anything outside the four read-only tools declared to it
-(`sliver_generate_payload` is deliberately **not** exposed as a tool).
+cannot invoke anything outside the tools declared to it.
+
+The discovery tool is the clearest example: `sliver_run_discovery` is exposed to
+the model, but it is `state-changing` (deny-by-default `[y/N]`) and accepts only a
+strict read-only allow-list (`whoami`, `id`, `uname -a`, `hostname`, `uptime`).
+Any other command is refused before it reaches the target, so even a
+prompt-injected or hallucinated command cannot turn the agent into a
+general-purpose remote runner. `sliver_generate_payload` is deliberately **not**
+exposed as a tool at all.
 
 The LLM can describe *how* to generate an implant; only the operator's `y` at the
 confirmation prompt lets AdversarySim actually build one. There is no path from
@@ -269,6 +292,16 @@ adversarysim sessions
 adversarysim beacons
 adversarysim jobs
 ```
+
+### Run a discovery command on a session (MITRE T1082, approval required)
+
+```bash
+adversarysim discover ab12cd34 whoami
+adversarysim discover ab12cd34 "uname -a"
+```
+
+Only the allow-listed read-only commands are accepted (`whoami`, `id`, `uname -a`,
+`hostname`, `uptime`); the action is `state-changing` and prompts for `[y/N]`.
 
 ### Generate an implant (operator approval required)
 

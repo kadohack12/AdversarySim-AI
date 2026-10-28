@@ -89,6 +89,35 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "sliver_run_discovery",
+            "description": (
+                "Exécute une commande de découverte système en LECTURE SEULE sur "
+                "une session Sliver (MITRE T1082 - System Information Discovery). "
+                "Utile pour savoir quel utilisateur, quel OS ou quel uptime tourne "
+                "sur la machine cible. Nécessite l'approbation de l'opérateur."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Identifiant de la session Sliver cible (id, nom ou index)."
+                        ),
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Commande de découverte autorisée.",
+                        "enum": ["whoami", "id", "uname -a", "hostname", "uptime"],
+                    },
+                },
+                "required": ["session_id", "command"],
+            },
+        },
+    },
 ]
 
 

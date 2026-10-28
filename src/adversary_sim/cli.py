@@ -54,25 +54,33 @@ RISK_BY_TOOL = {
     "sliver_list_sessions": RiskLevel.READ_ONLY,
     "sliver_list_beacons": RiskLevel.READ_ONLY,
     "sliver_list_jobs": RiskLevel.READ_ONLY,
+    "sliver_run_discovery": RiskLevel.STATE_CHANGING,
     "sliver_generate_payload": RiskLevel.DESTRUCTIVE,
 }
 
 # Sliver tools the local model may invoke through tool calling. Every name here
-# must be a zero-argument, read-only function in :mod:`adversary_sim.sliver`;
-# the CLI still routes each call through the Safety Gate. Resolved dynamically
-# so the binding always reflects the current module state.
+# must be a function in :mod:`adversary_sim.sliver`; the CLI still routes each
+# call through the Safety Gate. Resolved dynamically so the binding always
+# reflects the current module state.
 TOOL_NAMES = frozenset(
     {
         "sliver_status",
         "sliver_list_sessions",
         "sliver_list_beacons",
         "sliver_list_jobs",
+        "sliver_run_discovery",
     }
 )
 
+# Tools that accept arguments from the model (name -> ordered parameter names).
+# Tools absent from this map are invoked with no arguments.
+TOOL_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "sliver_run_discovery": ("session_id", "command"),
+}
+
 
 def _resolve_tool(name: str):
-    """Return the read-only sliver function for *name*, or None if not allowed."""
+    """Return the sliver function for *name*, or None if not allowed."""
     if name not in TOOL_NAMES:
         return None
     return getattr(sliver, name, None)
@@ -175,6 +183,29 @@ def beacons() -> None:
 def jobs() -> None:
     """List active Sliver listeners (jobs)."""
     _list_command("jobs", "Active Sliver listeners (jobs)")
+
+
+@app.command()
+def discover(
+    session: str = typer.Argument(..., help="Target session id, name or index."),
+    command: str = typer.Argument(
+        ...,
+        help="Discovery command: whoami, id, uname -a, hostname or uptime.",
+    ),
+) -> None:
+    """Run one read-only discovery command on a session (MITRE T1082).
+
+    Operator approval is required: the action is classified ``state-changing``.
+    Only the allow-listed commands are accepted; anything else is refused.
+    """
+    print_banner()
+    result = run_action(
+        f"Run discovery command '{command}' on session {session}",
+        lambda: sliver.sliver_run_discovery(session, command),
+        risk=RISK_BY_TOOL["sliver_run_discovery"],
+        command=f"sliver_run_discovery session={session} command={command}",
+    )
+    console.print(Panel(result, title="System discovery", border_style="green"))
 
 
 def _list_command(kind: str, title: str) -> None:
@@ -367,11 +398,26 @@ def _execute_tool_call(call: ToolCall) -> str:
 
     console.print(f"[dim]→ model requested tool[/dim] [bold]{call.name}[/bold]")
     summary = f"Run Sliver tool '{call.name}' requested by the local model"
+    command = call.name
+
+    argument_names = TOOL_ARGUMENTS.get(call.name)
+    if argument_names:
+        missing = [name for name in argument_names if name not in call.arguments]
+        if missing:
+            return f"Error: tool '{call.name}' is missing argument(s): {', '.join(missing)}."
+        kwargs = {name: call.arguments[name] for name in argument_names}
+        command = f"{call.name} " + " ".join(f"{k}={v!r}" for k, v in kwargs.items())
+
+        def operation(  # noqa: ANN202 - closure over resolved tool + args
+            _name=call.name, _kwargs=kwargs
+        ):
+            return _resolve_tool(_name)(**_kwargs)
+
     return run_action(
         summary,
         operation,
         risk=RISK_BY_TOOL.get(call.name, RiskLevel.READ_ONLY),
-        command=call.name,
+        command=command,
     )
 
 

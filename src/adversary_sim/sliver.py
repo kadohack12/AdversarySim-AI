@@ -32,6 +32,8 @@ __all__ = [
     "sliver_list_beacons",
     "sliver_list_jobs",
     "sliver_generate_payload",
+    "sliver_run_discovery",
+    "DISCOVERY_COMMANDS",
 ]
 
 # Path/name of the sliver client binary. Overridable for custom installs.
@@ -114,6 +116,29 @@ _ALLOWED_OS = tuple(_ALLOWED_FORMATS)
 
 # Default output format when the caller does not specify one.
 _DEFAULT_FORMAT = {"windows": "exe", "linux": "elf", "darwin": "macho"}
+
+# Strict allow-list of read-only host discovery commands (MITRE ATT&CK T1082 —
+# System Information Discovery). Only these exact commands may run on a target;
+# anything else is refused before it reaches the target.
+DISCOVERY_COMMANDS: dict[str, str] = {
+    "whoami": "whoami",
+    "id": "id",
+    "uname": "uname -a",
+    "hostname": "hostname",
+    "uptime": "uptime",
+}
+
+# Accept both the short keys above and the literal command strings operators or
+# models may pass (e.g. "uname -a").
+_DISCOVERY_ALIASES: dict[str, str] = {
+    **{key: key for key in DISCOVERY_COMMANDS},
+    **{value: key for key, value in DISCOVERY_COMMANDS.items()},
+}
+
+# Timeout for a single discovery command executed on a session.
+_DISCOVERY_TIMEOUT = 60
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
 
@@ -509,3 +534,58 @@ def sliver_generate_payload(
 
     header = f"Ran: {command}\nRequested implant saved (if generation succeeded) to: {save_path}\n"
     return f"{header}\nClient output:\n{output}" if output else header
+
+
+def sliver_run_discovery(session_id: str, command: str) -> str:
+    """Run one read-only discovery command on a Sliver session (MITRE T1082).
+
+    This emulates **System Information Discovery** on an authorised target. To
+    keep the action defensible it accepts only a strict allow-list of read-only
+    commands (see :data:`DISCOVERY_COMMANDS`): ``whoami``, ``id``, ``uname -a``,
+    ``hostname`` and ``uptime``. Anything else is refused before any command
+    reaches the target.
+
+    The command is dispatched through the Sliver session console as
+    ``use <session_id>; <command>``. This function performs no approval itself —
+    the caller (the CLI) must route it through the human-in-the-loop Safety Gate,
+    which classifies it as ``state-changing`` and requires ``[y/N]``.
+
+    Args:
+        session_id: The Sliver session to run the command on (id, name or index).
+        command: One of the allow-listed discovery commands, either the short
+            key (``whoami``) or the literal command string (``uname -a``).
+
+    Returns:
+        str: The command that ran and the target's output, or a clear refusal or
+        error message.
+    """
+    if not _client_path():
+        return _not_installed_message()
+
+    session = str(session_id).strip()
+    if not session or not _SESSION_ID_RE.match(session):
+        return (
+            f"Invalid session id '{session_id}': expected 1-64 characters of "
+            "letters, digits, underscore or hyphen."
+        )
+
+    requested = str(command).strip()
+    key = _DISCOVERY_ALIASES.get(requested) or _DISCOVERY_ALIASES.get(requested.lower())
+    if key is None:
+        allowed = ", ".join(sorted(DISCOVERY_COMMANDS))
+        return f"Refused: '{command}' is not an allowed discovery command. Allowed: {allowed}."
+    resolved = DISCOVERY_COMMANDS[key]
+
+    console_commands = [f"use {session}", resolved]
+    try:
+        output = _strip_ansi(
+            _run_sliver_commands(console_commands, timeout=_DISCOVERY_TIMEOUT)
+        ).strip()
+    except Exception as exc:  # noqa: BLE001
+        return f"Failed to run discovery command '{resolved}': {exc}"
+
+    if _looks_like_connection_error(output):
+        return _daemon_down_message(output)
+
+    header = f"Ran on session {session}: {resolved}\n"
+    return f"{header}\nTarget output:\n{output}" if output else f"{header}\n(no output)"

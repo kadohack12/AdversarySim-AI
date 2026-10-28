@@ -16,7 +16,16 @@ runner = CliRunner()
 def test_help_lists_commands():
     result = runner.invoke(cli.app, ["--help"])
     assert result.exit_code == 0
-    for command in ("status", "sessions", "beacons", "jobs", "generate", "ask", "shell"):
+    for command in (
+        "status",
+        "sessions",
+        "beacons",
+        "jobs",
+        "discover",
+        "generate",
+        "ask",
+        "shell",
+    ):
         assert command in result.stdout
 
 
@@ -107,6 +116,32 @@ def test_generate_command_runs_when_approved(monkeypatch):
         "beacon": False,
     }
     assert "generated" in result.stdout
+
+
+def test_discover_command_runs_when_approved(monkeypatch):
+    monkeypatch.setenv("ADVERSARYSIM_ASSUME_YES", "1")
+    captured = {}
+
+    def _discovery(session_id, command):
+        captured["session_id"] = session_id
+        captured["command"] = command
+        return "Ran on session ab12cd34: whoami\n\nTarget output:\nroot"
+
+    monkeypatch.setattr(sliver, "sliver_run_discovery", _discovery)
+    result = runner.invoke(cli.app, ["discover", "ab12cd34", "whoami"])
+    assert result.exit_code == 0
+    assert captured == {"session_id": "ab12cd34", "command": "whoami"}
+    assert "root" in result.stdout
+
+
+def test_discover_command_uses_safety_gate(monkeypatch):
+    monkeypatch.setenv("ADVERSARYSIM_DRY_RUN", "true")
+    called = []
+    monkeypatch.setattr(sliver, "sliver_run_discovery", lambda *a, **k: called.append(a) or "x")
+    result = runner.invoke(cli.app, ["discover", "s1", "whoami"])
+    assert result.exit_code == 0
+    assert called == []  # dry-run refuses, so nothing ran
+    assert "would" in result.stdout.lower()
 
 
 def test_render_table_handles_empty_rows():

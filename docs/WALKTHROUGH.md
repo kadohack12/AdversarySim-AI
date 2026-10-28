@@ -236,6 +236,33 @@ delivered, executed, and observed entirely on your own machine.
 > The model reasons about the observed behaviour and proposes detections — but it
 > never touches the target itself.
 
+### Optional — defensible system discovery (MITRE T1082)
+
+With a session established, you can emulate a small piece of **System Information
+Discovery** on the target. It is a *narrow, allow-listed* action, not a remote
+shell:
+
+```bash
+adversarysim discover <SESSION_ID> whoami
+adversarysim discover <SESSION_ID> "uname -a"
+```
+
+Only `whoami`, `id`, `uname -a`, `hostname` and `uptime` are accepted. The action
+is `state-changing`, so AdversarySim prompts for `[y/N]` — press Enter and nothing
+runs:
+
+```text
+  Run discovery command 'whoami' on session <SESSION_ID>
+  command: sliver_run_discovery session=<SESSION_ID> command=whoami
+  risk: state-changing
+Proceed? [y/N]
+```
+
+**Expected result:** after approving, the target's output is shown (`root`,
+kernel string, etc.). The same tool is available to the local model inside
+`adversarysim shell` — ask "Qui est l'utilisateur sur la session ?" and the model
+requests `sliver_run_discovery`, still gated by the same `[y/N]` prompt.
+
 ---
 
 ## Step 6 — Immediate cleanup
@@ -282,9 +309,11 @@ rm -f implants/sliver_implant_linux_8888.elf
 
 - ✅ All callbacks stay on `127.0.0.1` — **zero telemetry**.
 - ✅ Every implant generation is **operator-approved**.
+- ✅ Discovery commands are **allow-listed, read-only, and operator-approved** (`[y/N]`).
 - ✅ The target is a **disposable `--rm` container**.
 - ✅ Cleanup is a single `exit`.
-- ❌ AdversarySim never drives live implants — it enumerates and generates only.
+- ❌ AdversarySim never exposes a general-purpose remote shell — discovery is a
+  fixed allow-list, not arbitrary command execution.
 
 Continue to the [README](../README.md) for the architecture and the role of the
 local LLM.
