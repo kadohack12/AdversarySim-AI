@@ -1,5 +1,10 @@
 # AdversarySim-AI
 
+![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
+![Tests](https://img.shields.io/badge/tests-87%20passing-brightgreen)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Zero Telemetry](https://img.shields.io/badge/telemetry-zero-blueviolet)
+
 > A lightweight, safety-first AI assistant for **purple teaming** and **adversary emulation** with
 > [Sliver C2](https://github.com/BishopFox/sliver) and **local LLMs** via [Ollama](https://ollama.com).
 
@@ -9,6 +14,52 @@ model so your operator notes, session data and target details never leave your m
 
 **Nothing executes without explicit operator approval.** Every action passes through a
 human-in-the-loop gate before it runs.
+
+> 📖 **New here?** Follow the [5-minute lab walkthrough](docs/WALKTHROUGH.md) to reproduce a
+> complete purple-teaming loop — listener, sandbox, implant, telemetry, cleanup — end to end.
+
+---
+
+## Architecture
+
+```text
+                        ┌──────────────────────────────────────────────┐
+                        │                 Operator                     │
+                        │        (human-in-the-loop, approves)         │
+                        └───────────────────────┬──────────────────────┘
+                                                │  CLI / interactive shell
+                                                ▼
+              ┌───────────────────────────────────────────────────────────┐
+              │             AdversarySim-AI CLI  +  Local LLM             │
+              │   ┌─────────────────────┐      ┌─────────────────────┐    │
+              │   │  typer + rich CLI   │◄────►│  Ollama (local LLM) │    │
+              │   │  /status /beacons   │      │  reason & propose   │    │
+              │   └──────────┬──────────┘      └─────────────────────┘    │
+              └──────────────┼────────────────────────────────────────────┘
+                             │  every action is screened
+                             ▼
+              ┌───────────────────────────────────────────────────────────┐
+              │                     Safety Gate (HITL)                    │
+              │   read-only → allow   ·   state-changing → deny           │
+              │   destructive → deny  ·   dry-run → print only            │
+              └──────────────────────────┬────────────────────────────────┘
+                                         │  approved actions only
+                                         ▼
+              ┌───────────────────────────────────────────────────────────┐
+              │                    Sliver C2 Server                       │
+              │            mTLS / HTTP(S) listeners · jobs                 │
+              └──────────────────────────┬────────────────────────────────┘
+                                         │  callback (loopback only)
+                                         ▼
+              ┌───────────────────────────────────────────────────────────┐
+              │                    Sandbox Target                         │
+              │        disposable container (podman/docker --rm)          │
+              └───────────────────────────────────────────────────────────┘
+```
+
+The operator drives everything. The local LLM reasons and proposes, the Safety Gate
+decides what may run, and Sliver executes only what the operator approved — against a
+throwaway sandbox.
 
 ---
 
@@ -57,6 +108,75 @@ AdversarySim-AI enumerates and generates; it does not drive live implants.
 
 ---
 
+## 🧠 The Role of Local AI in AdversarySim
+
+The language model is the reasoning layer of AdversarySim-AI — not an execution
+engine. It runs entirely on your own hardware through
+[Ollama](https://ollama.com) and is deliberately kept on a short leash.
+
+### Privacy-First / Zero-Telemetry architecture
+
+Offensive and purple-team work generates exactly the data you can never afford to
+leak: target IP addresses, internal hostnames, usernames, listener ports, payload
+paths, and the audit trail of what you emulated. Sending any of that to a
+third-party API would hand an external provider a map of your environment and the
+timeline of your exercise.
+
+AdversarySim therefore talks **only** to a local Ollama instance
+(`OLLAMA_HOST`, default `http://127.0.0.1:11434`). There are:
+
+- **no API keys** and no provider SDKs,
+- **no outbound calls** to any hosted model,
+- **no telemetry** or usage reporting of any kind.
+
+Your prompts, session data and detection notes stay on the machine. That is what
+makes the tool usable in a regulated or air-gapped audit.
+
+### Role #1 — Context assistant & purple teaming
+
+The model is a context-aware teammate for the operator. Given the Sliver
+telemetry AdversarySim surfaces (beacons, sessions, listeners), it can explain
+what an action looks like on the wire and suggest matching detection logic —
+**Sigma** rules, **auditd** policies, or **YARA** signatures — that correspond to
+the Sliver behaviour just observed.
+
+```bash
+adversarysim ask "Suggest an auditd rule for an ELF beacon executing from /tmp."
+```
+
+It proposes; the detection engineer decides. This is the purple-team loop: emulate,
+observe, and turn the observation into a detection.
+
+### Role #2 — Conversational interface
+
+Inside `adversarysim shell`, the model is a natural-language interface to the lab.
+You can ask it to summarise the current state — "how many beacons are checking in,
+and over which transport?" — and it reasons over the same data the CLI exposes.
+
+It **coexists with the slash shortcuts** rather than replacing them: `/status`,
+`/beacons`, `/jobs`, `/sessions` and `/help` remain deterministic, instant, and
+model-independent, so you always have a reliable path when the model is slow or
+unavailable.
+
+```text
+adversarysim> /beacons                 # deterministic Sliver query
+adversarysim> summarise the beacons    # LLM narrative over the same data
+```
+
+### Role #3 — Strict separation of execution (Safety Gate)
+
+The model **reasons and proposes; it never executes.** It has no ability to run a
+system command, generate a payload, or drive a C2 channel on its own. Every
+concrete action — including anything the model suggests — must pass through the
+[Safety Gate](#safety-model) and be explicitly approved by a human operator
+(**strict Human-in-the-Loop**).
+
+The LLM can describe *how* to generate an implant; only the operator's `y` at the
+confirmation prompt lets AdversarySim actually build one. There is no path from
+"the model said so" to "the system did it" that bypasses the operator.
+
+---
+
 ## Requirements
 
 - Python **3.11+**
@@ -102,6 +222,9 @@ sliver-client import operator.cfg
 ---
 
 ## Usage
+
+> Prefer a guided tour? The [5-minute walkthrough](docs/WALKTHROUGH.md) runs the whole
+> loop — listener, sandbox, implant, telemetry, cleanup — step by step.
 
 ```bash
 adversarysim --help
@@ -183,6 +306,8 @@ tests/
 ├── test_core.py
 ├── test_safety.py
 └── test_sliver.py
+docs/
+└── WALKTHROUGH.md  # end-to-end purple-teaming lab guide
 ```
 
 The Sliver wrapper in `src/adversary_sim/sliver.py` has **no dependency on the rest of the
