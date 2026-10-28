@@ -96,9 +96,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "Exécute une commande de découverte en LECTURE SEULE sur une session "
                 "Sliver. Couvre la découverte système (MITRE T1082 : utilisateur, OS, "
-                "uptime) et la découverte de fichiers/répertoires (MITRE T1083 : "
-                "répertoire courant, contenu de /tmp, lecture d'un fichier leurre "
-                "canary). Nécessite l'approbation de l'opérateur."
+                "uptime), la découverte de fichiers/répertoires (MITRE T1083 : "
+                "répertoire courant, contenu de /tmp, lecture d'un leurre canary), "
+                "la découverte de processus (MITRE T1057 : ps aux) et la découverte "
+                "réseau (MITRE T1016 : ip a / route -n). Nécessite l'approbation de "
+                "l'opérateur."
             ),
             "parameters": {
                 "type": "object",
@@ -124,6 +126,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "pwd",
                             "ls -la",
                             "cat /tmp/canary_data.txt",
+                            "ps aux",
+                            "ip a",
+                            "route -n",
                         ],
                     },
                 },

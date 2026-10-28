@@ -236,7 +236,7 @@ delivered, executed, and observed entirely on your own machine.
 > The model reasons about the observed behaviour and proposes detections — but it
 > never touches the target itself.
 
-### Optional — defensible discovery (MITRE T1082 + T1083)
+### Optional — defensible discovery (MITRE T1082 + T1083 + T1057 + T1016)
 
 With a session established, you can emulate a small slice of adversary discovery
 on the target. It is a *narrow, allow-listed* action, not a remote shell:
@@ -246,6 +246,8 @@ adversarysim discover <SESSION_ID> whoami
 adversarysim discover <SESSION_ID> "uname -a"
 adversarysim discover <SESSION_ID> ls          # T1083 — directory listing
 adversarysim discover <SESSION_ID> "cat /tmp/canary_data.txt"   # T1083 — canary read
+adversarysim discover <SESSION_ID> "ps aux"    # T1057 — process discovery
+adversarysim discover <SESSION_ID> "ip a"      # T1016 — network discovery
 ```
 
 Seed a decoy on the target first if you want something to find:
@@ -261,6 +263,8 @@ Only these commands are accepted:
 | --------- | -------- |
 | **T1082** System Information Discovery | `whoami`, `id`, `uname -a`, `hostname`, `uptime` |
 | **T1083** File and Directory Discovery | `pwd`, `ls -la`, `cat /tmp/canary_*.txt` |
+| **T1057** Process Discovery | `ps aux` |
+| **T1016** System Network Configuration Discovery | `ip a`, `route -n` |
 
 Paths are fixed literals — a canary read is confined to `/tmp/canary_*.txt` — so
 discovery can never be aimed at an arbitrary file (no `cat /etc/shadow`, no
@@ -279,6 +283,31 @@ Proceed? [y/N]
 string, directory listing, canary contents). The same tool is available to the
 local model inside `adversarysim shell` — ask "Quels fichiers sont dans /tmp ?" and
 the model requests `sliver_run_discovery`, still gated by the same `[y/N]` prompt.
+
+### Optional — MITRE ATT&CK run with an automatic Purple Team report
+
+The catalogue wraps the same allow-listed commands behind MITRE technique ids and
+writes an audit report after each run.
+
+```bash
+adversarysim mitre list          # show the catalogue + safety status
+adversarysim mitre run T1082     # auto-selects the active beacon
+adversarysim mitre run T1057 --no-report   # skip the LLM, curated detections only
+```
+
+Expected output (abridged):
+
+```text
+  ▚ MITRE T1082 System Information Discovery
+  ▚ SAFETY GATE · STATE-CHANGING
+Proceed? [y/N] y
+  ▚ T1082 · execution → Linux target-node 6.1.0 ...
+  ▚ Purple Team report → reports/T1082_20261028-104314.md
+```
+
+The report contains the run metadata (date, operator, target), the technique, the
+raw Sliver evidence, and defensive recommendations — written by the local LLM when
+Ollama is up, otherwise the curated Sigma/auditd suggestions from the catalogue.
 
 ---
 

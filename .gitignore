@@ -20,6 +20,7 @@ htmlcov/
 
 # Project runtime artefacts
 implants/
+reports/
 *.cfg
 
 # Editors / OS

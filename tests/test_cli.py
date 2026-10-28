@@ -173,3 +173,93 @@ def test_risk_styles_cover_all_levels():
 
     for level in RiskLevel:
         assert level in cli.RISK_STYLE
+
+
+# --- MITRE ATT&CK emulation ------------------------------------------------
+
+
+def test_mitre_list_shows_catalogue():
+    result = runner.invoke(cli.app, ["mitre", "list"])
+    assert result.exit_code == 0
+    for tid in ("T1082", "T1083", "T1057", "T1016"):
+        assert tid in result.stdout
+    assert "state-changing" in result.stdout
+
+
+def test_mitre_run_rejects_unknown_technique():
+    result = runner.invoke(cli.app, ["mitre", "run", "T9999"])
+    assert result.exit_code == 2
+    assert "Unknown technique" in result.stdout
+
+
+def test_detect_mitre_request_matches_known_technique():
+    tech = cli._detect_mitre_request("Lance le test MITRE T1082")
+    assert tech is not None and tech.id == "T1082"
+
+
+def test_detect_mitre_request_ignores_plain_chat():
+    assert cli._detect_mitre_request("Bonjour, comment vas-tu ?") is None
+    # An id without the word "mitre" must not trigger the flow.
+    assert cli._detect_mitre_request("liste T1082 s'il te plaît") is None
+
+
+def test_detect_mitre_request_ignores_unknown_id():
+    assert cli._detect_mitre_request("MITRE T9999") is None
+
+
+def test_render_techniques_table_runs():
+    # Should not raise.
+    cli.render_techniques_table()
+
+
+def test_mitre_run_auto_selects_target_and_writes_report(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADVERSARYSIM_ASSUME_YES", "1")
+    monkeypatch.delenv("ADVERSARYSIM_DRY_RUN", raising=False)
+    monkeypatch.setenv("ADVERSARYSIM_REPORTS_DIR", str(tmp_path))
+
+    captured = {}
+
+    def _discovery(session_id, command):
+        captured["session_id"] = session_id
+        captured["command"] = command
+        return "Ran on session ab12cd34: uname -a\n\nTarget output:\nLinux target 6.1"
+
+    monkeypatch.setattr(sliver, "sliver_run_discovery", _discovery)
+    # Auto-resolve the active target without a real Sliver server.
+    monkeypatch.setattr(sliver, "sliver_resolve_target", lambda: "ab12cd34")
+    monkeypatch.setattr(sliver, "is_target_id", lambda candidate: candidate == "ab12cd34")
+
+    result = runner.invoke(cli.app, ["mitre", "run", "T1082", "--no-report"])
+    assert result.exit_code == 0
+    assert captured == {"session_id": "ab12cd34", "command": "uname"}
+    assert "Purple Team" in result.stdout
+    reports_written = list(tmp_path.glob("T1082_*.md"))
+    assert len(reports_written) == 1
+    assert "System Information Discovery" in reports_written[0].read_text(encoding="utf-8")
+
+
+def test_mitre_run_reports_no_target(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADVERSARYSIM_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        sliver, "sliver_resolve_target", lambda: "No active Sliver beacon or session"
+    )
+    monkeypatch.setattr(sliver, "is_target_id", lambda candidate: False)
+
+    result = runner.invoke(cli.app, ["mitre", "run", "T1082"])
+    assert result.exit_code == 0
+    assert "No target" in result.stdout
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_mitre_run_uses_safety_gate(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADVERSARYSIM_DRY_RUN", "true")
+    monkeypatch.setenv("ADVERSARYSIM_REPORTS_DIR", str(tmp_path))
+    called = []
+    monkeypatch.setattr(sliver, "sliver_run_discovery", lambda *a, **k: called.append(a) or "x")
+    monkeypatch.setattr(sliver, "sliver_resolve_target", lambda: "ab12cd34")
+    monkeypatch.setattr(sliver, "is_target_id", lambda candidate: candidate == "ab12cd34")
+
+    result = runner.invoke(cli.app, ["mitre", "run", "T1082", "--no-report"])
+    assert result.exit_code == 0
+    assert called == []  # dry-run refuses, nothing ran, no report written
+    assert list(tmp_path.glob("*.md")) == []

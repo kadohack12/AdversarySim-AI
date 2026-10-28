@@ -33,6 +33,8 @@ __all__ = [
     "sliver_list_jobs",
     "sliver_generate_payload",
     "sliver_run_discovery",
+    "sliver_resolve_target",
+    "is_target_id",
     "DISCOVERY_COMMANDS",
 ]
 
@@ -106,6 +108,13 @@ _BEACON_HEADERS_COMPACT = (
 )
 _JOB_HEADERS = ("ID", "Name", "Protocol", "Port", "Domains")
 
+# Order in which :func:`sliver_resolve_target` looks for a target: beacons
+# (asynchronous implants) first, then interactive sessions.
+_TARGET_LISTERS: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = (
+    ("beacons", (_BEACON_HEADERS_FULL, _BEACON_HEADERS_COMPACT)),
+    ("sessions", (_SESSION_HEADERS_FULL, _SESSION_HEADERS_COMPACT)),
+)
+
 # Supported implant generation formats per target OS.
 _ALLOWED_FORMATS = {
     "windows": {"exe", "shared", "shellcode", "service", "dll"},
@@ -122,6 +131,8 @@ _DEFAULT_FORMAT = {"windows": "exe", "linux": "elf", "darwin": "macho"}
 # target. Grouped by MITRE ATT&CK technique:
 #   T1082 — System Information Discovery (whoami, id, uname, hostname, uptime)
 #   T1083 — File and Directory Discovery (pwd, ls, and a fixed canary read)
+#   T1057 — Process Discovery (ps)
+#   T1016 — System Network Configuration Discovery (ip, route)
 DISCOVERY_COMMANDS: dict[str, str] = {
     # T1082 — System Information Discovery
     "whoami": "whoami",
@@ -135,6 +146,12 @@ DISCOVERY_COMMANDS: dict[str, str] = {
     "pwd": "pwd",
     "ls": "ls -la",
     "canary": "cat /tmp/canary_data.txt",
+    # T1057 — Process Discovery. Fixed flags, no target selector: it can only
+    # enumerate processes, never signal or kill one.
+    "ps": "ps aux",
+    # T1016 — System Network Configuration Discovery. Read-only, no arguments.
+    "ip": "ip a",
+    "route": "route -n",
 }
 
 # Accept both the short keys above and the literal command strings operators or
@@ -405,6 +422,25 @@ def sliver_status() -> str:
     return f"{client_line}\nSliver server/daemon is reachable and responding."
 
 
+def _collect_rows(
+    command: str, header_sets: Iterable[Iterable[str]]
+) -> tuple[list[dict[str, str]], str]:
+    """Run a Sliver list command and return ``(rows, error)``.
+
+    ``error`` is empty on success; otherwise it holds a human-readable message
+    (client missing, daemon down, or the runner failed) and ``rows`` is empty.
+    """
+    if not _client_path():
+        return [], _not_installed_message()
+    try:
+        output = _run_sliver_commands([command], timeout=_LIST_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001
+        return [], f"Failed to list Sliver {command}: {exc}"
+    if _looks_like_connection_error(output):
+        return [], _daemon_down_message(output)
+    return _parse_table(output, header_sets), ""
+
+
 def sliver_list_sessions() -> str:
     """List active interactive Sliver sessions.
 
@@ -416,18 +452,9 @@ def sliver_list_sessions() -> str:
         str: A formatted list of active sessions, or a clear message when no
         sessions are available or the server is unreachable.
     """
-    if not _client_path():
-        return _not_installed_message()
-
-    try:
-        output = _run_sliver_commands(["sessions"], timeout=_LIST_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001
-        return f"Failed to list Sliver sessions: {exc}"
-
-    if _looks_like_connection_error(output):
-        return _daemon_down_message(output)
-
-    rows = _parse_table(output, (_SESSION_HEADERS_FULL, _SESSION_HEADERS_COMPACT))
+    rows, error = _collect_rows("sessions", (_SESSION_HEADERS_FULL, _SESSION_HEADERS_COMPACT))
+    if error:
+        return error
     return _format_rows(rows, "Active Sliver sessions", "No active Sliver sessions.")
 
 
@@ -441,18 +468,9 @@ def sliver_list_beacons() -> str:
         str: A formatted list of beacons, or a clear message when none are
         registered or the server is unreachable.
     """
-    if not _client_path():
-        return _not_installed_message()
-
-    try:
-        output = _run_sliver_commands(["beacons"], timeout=_LIST_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001
-        return f"Failed to list Sliver beacons: {exc}"
-
-    if _looks_like_connection_error(output):
-        return _daemon_down_message(output)
-
-    rows = _parse_table(output, (_BEACON_HEADERS_FULL, _BEACON_HEADERS_COMPACT))
+    rows, error = _collect_rows("beacons", (_BEACON_HEADERS_FULL, _BEACON_HEADERS_COMPACT))
+    if error:
+        return error
     return _format_rows(rows, "Sliver beacons", "No Sliver beacons registered.")
 
 
@@ -466,18 +484,9 @@ def sliver_list_jobs() -> str:
         str: A formatted list of active listeners, or a clear message when none
         are running or the server is unreachable.
     """
-    if not _client_path():
-        return _not_installed_message()
-
-    try:
-        output = _run_sliver_commands(["jobs"], timeout=_LIST_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001
-        return f"Failed to list Sliver jobs: {exc}"
-
-    if _looks_like_connection_error(output):
-        return _daemon_down_message(output)
-
-    rows = _parse_table(output, (_JOB_HEADERS,))
+    rows, error = _collect_rows("jobs", (_JOB_HEADERS,))
+    if error:
+        return error
     return _format_rows(rows, "Active Sliver listeners (jobs)", "No active Sliver listeners.")
 
 
@@ -578,6 +587,9 @@ def sliver_run_discovery(session_id: str, command: str) -> str:
       ``uname -a``, ``hostname``, ``uptime``.
     - **MITRE T1083 — File and Directory Discovery**: ``pwd``, ``ls -la`` and a
       canary read (``cat /tmp/canary_*.txt``).
+    - **MITRE T1057 — Process Discovery**: ``ps aux``.
+    - **MITRE T1016 — System Network Configuration Discovery**: ``ip a``,
+      ``route -n``.
 
     To keep the action defensible it accepts only a strict allow-list of
     read-only commands (see :data:`DISCOVERY_COMMANDS`). Paths are fixed literals
@@ -631,3 +643,35 @@ def sliver_run_discovery(session_id: str, command: str) -> str:
 
     header = f"Ran on session {session}: {resolved}\n"
     return f"{header}\nTarget output:\n{output}" if output else f"{header}\n(no output)"
+
+
+def sliver_resolve_target() -> str:
+    """Resolve the active implant to operate on when none was supplied.
+
+    Lists beacons first (asynchronous implants), then falls back to interactive
+    sessions. Returns the first target's id, or a clear message explaining that
+    nothing is available or the server is unreachable.
+
+    Returns:
+        str: A bare target id when a candidate is found, otherwise a
+        human-readable message (which callers should treat as "no target").
+    """
+    for command, headers in _TARGET_LISTERS:
+        rows, error = _collect_rows(command, headers)
+        if error:
+            return error
+        if rows:
+            target_id = rows[0].get("ID", "").strip()
+            if target_id:
+                return target_id
+
+    return "No active Sliver beacon or session found. Deploy an implant first."
+
+
+def is_target_id(candidate: str) -> bool:
+    """Return True when *candidate* looks like a bare Sliver target id.
+
+    Lets callers distinguish a real id returned by :func:`sliver_resolve_target`
+    from a human-readable "nothing available" / error message.
+    """
+    return bool(_SESSION_ID_RE.match(str(candidate).strip()))

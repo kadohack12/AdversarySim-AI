@@ -1,7 +1,7 @@
 # AdversarySim-AI
 
 ![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
-![Tests](https://img.shields.io/badge/tests-152%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-194%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Zero Telemetry](https://img.shields.io/badge/telemetry-zero-blueviolet)
 ![by kadohack12](https://img.shields.io/badge/by-kadohack12-red)
@@ -106,11 +106,18 @@ on an already-established session. It does not provide a general-purpose remote 
   (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`) plus the
   allow-listed discovery tool (`sliver_run_discovery`) directly from the interactive shell, with
   every call routed through the Safety Gate.
-- **Defensible discovery (MITRE T1082 + T1083)** — `sliver_run_discovery` emulates System
-  Information Discovery (`whoami`, `id`, `uname -a`, `hostname`, `uptime`) and File and Directory
-  Discovery (`pwd`, `ls -la`, and a canary read confined to `/tmp/canary_*.txt`). Paths are fixed
+- **Defensible discovery (MITRE T1082 + T1083 + T1057 + T1016)** — `sliver_run_discovery` emulates
+  System Information Discovery (`whoami`, `id`, `uname -a`, `hostname`, `uptime`), File and Directory
+  Discovery (`pwd`, `ls -la`, and a canary read confined to `/tmp/canary_*.txt`), Process Discovery
+  (`ps aux`) and System Network Configuration Discovery (`ip a`, `route -n`). Paths are fixed
   literals, never operator- or model-supplied. Anything else is refused before it reaches the
   target, and the action is `state-changing` (`[y/N]`).
+- **MITRE ATT&CK emulation catalogue** — `adversarysim mitre list` shows the allow-listed
+  techniques with their safety status; `adversarysim mitre run <ID>` resolves the active beacon
+  automatically, routes the run through the Safety Gate, and writes a Purple Team report.
+- **Purple Team reports** — every `mitre run` writes `reports/<ID>_<timestamp>.md` with metadata,
+  the technique, the raw Sliver evidence, and defensive recommendations written by the local LLM
+  (Sigma / auditd / YARA), falling back to curated detections when Ollama is unavailable.
 - **Human-in-the-loop safety layer** — a single approval gate that every action goes through.
 - **Hyper-dark terminal UI** — a neon-on-black `rich` theme (`by kadohack12`), colourised tables
   for sessions and jobs, a risk-coloured Safety Gate header, and an interactive shell with slash
@@ -159,6 +166,11 @@ adversarysim ask "Suggest an auditd rule for an ELF beacon executing from /tmp."
 
 It proposes; the detection engineer decides. This is the purple-team loop: emulate,
 observe, and turn the observation into a detection.
+
+The same loop is wired into `adversarysim mitre run`: after a technique executes, the model drafts
+the "Recommandations défensives" section of the generated report (Sigma / auditd / YARA) from the
+raw Sliver evidence. When Ollama is offline, the report is still written using the curated
+detections in the technique catalogue, so the audit trail never depends on the model being up.
 
 ### Role #2 — Conversational interface
 
@@ -297,13 +309,15 @@ adversarysim beacons
 adversarysim jobs
 ```
 
-### Run a discovery command on a session (MITRE T1082 + T1083, approval required)
+### Run a discovery command on a session (approval required)
 
 ```bash
 adversarysim discover ab12cd34 whoami
 adversarysim discover ab12cd34 "uname -a"
 adversarysim discover ab12cd34 ls
 adversarysim discover ab12cd34 "cat /tmp/canary_data.txt"
+adversarysim discover ab12cd34 "ps aux"
+adversarysim discover ab12cd34 "ip a"
 ```
 
 Only the allow-listed read-only commands are accepted:
@@ -312,9 +326,32 @@ Only the allow-listed read-only commands are accepted:
 | --------- | -------- |
 | **T1082** System Information Discovery | `whoami`, `id`, `uname -a`, `hostname`, `uptime` |
 | **T1083** File and Directory Discovery | `pwd`, `ls -la`, `cat /tmp/canary_*.txt` |
+| **T1057** Process Discovery | `ps aux` |
+| **T1016** System Network Configuration Discovery | `ip a`, `route -n` |
 
 Paths are fixed literals — a canary read is confined to `/tmp/canary_*.txt` — so discovery can
 never be aimed at an arbitrary file. The action is `state-changing` and prompts for `[y/N]`.
+
+### MITRE ATT&CK emulation with automatic reports
+
+List the allow-listed techniques and their safety status:
+
+```bash
+adversarysim mitre list
+```
+
+Run one technique and write a Purple Team report:
+
+```bash
+adversarysim mitre run T1082                 # auto-selects the active beacon
+adversarysim mitre run T1083 ab12cd34        # explicit target
+adversarysim mitre run T1057 --no-report     # skip the LLM, use curated detections
+```
+
+`mitre run` resolves the target automatically (beacon first, then session) when no session id is
+given, routes the command through the Safety Gate (`[y/N]`), executes it, and writes
+`reports/<ID>_<timestamp>.md` containing the metadata, the technique, the raw Sliver evidence, and
+defensive recommendations drafted by the local LLM.
 
 ### Generate an implant (operator approval required)
 
@@ -340,14 +377,19 @@ adversarysim shell
 
 Inside the shell:
 
-| Command     | Action                              |
-| ----------- | ----------------------------------- |
-| `/status`   | check Sliver client and server      |
-| `/sessions` | list active sessions                |
-| `/beacons`  | list beacons                        |
-| `/jobs`     | list listeners                      |
-| `/help`     | show help                           |
-| `/quit`     | exit                                |
+| Command        | Action                                          |
+| -------------- | ----------------------------------------------- |
+| `/status`      | check Sliver client and server                  |
+| `/sessions`    | list active sessions                            |
+| `/beacons`     | list beacons                                    |
+| `/jobs`        | list listeners                                  |
+| `/mitre`       | list the MITRE ATT&CK technique catalogue       |
+| `/mitre T1082` | run a technique (Safety-Gated) and write a report |
+| `/help`        | show help                                       |
+| `/quit`        | exit                                            |
+
+You can also drive the MITRE flow in natural language — e.g. `Lance le test MITRE T1082` — and the
+shell will detect the technique, run it through the Safety Gate, and write the report.
 
 ---
 
@@ -357,6 +399,8 @@ Inside the shell:
 | ------------------------------- | ------------------------ | -------------------------------------------- |
 | `ADVERSARYSIM_SLIVER_CLIENT`    | `sliver-client`          | Path or name of the Sliver client binary.    |
 | `ADVERSARYSIM_WORKSPACE`        | `./implants`             | Where generated implants are written.        |
+| `ADVERSARYSIM_REPORTS_DIR`      | `./reports`              | Where Purple Team reports are written.       |
+| `ADVERSARYSIM_OPERATOR`         | `$USER`                  | Operator name recorded in report metadata.   |
 | `ADVERSARYSIM_MODEL`            | `qwen2.5-coder:7b`       | Ollama model to use.                         |
 | `OLLAMA_HOST`                   | `http://127.0.0.1:11434` | Ollama server URL.                           |
 | `ADVERSARYSIM_DRY_RUN`          | `false`                  | Print actions without executing them.        |
@@ -371,13 +415,16 @@ src/adversary_sim/
 ├── __init__.py     # package metadata
 ├── cli.py          # rich + typer terminal interface
 ├── core.py         # async Ollama connector
+├── reports.py      # purple-team audit report generator
 ├── safety.py       # human-in-the-loop approval gate
-└── sliver.py       # standalone sliver-client wrapper
+├── sliver.py       # standalone sliver-client wrapper
+└── techniques.py   # allow-listed MITRE ATT&CK catalogue
 tests/
 ├── test_cli.py
 ├── test_core.py
 ├── test_safety.py
 ├── test_sliver.py
+├── test_techniques.py    # technique catalogue + report generator
 └── test_tool_calling.py  # LLM tool calling through the Safety Gate
 docs/
 └── WALKTHROUGH.md  # end-to-end purple-teaming lab guide

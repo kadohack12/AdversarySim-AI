@@ -428,6 +428,11 @@ def test_discovery_commands_allowlist_is_exact():
         "pwd": "pwd",
         "ls": "ls -la",
         "canary": "cat /tmp/canary_data.txt",
+        # T1057 — Process Discovery
+        "ps": "ps aux",
+        # T1016 — System Network Configuration Discovery
+        "ip": "ip a",
+        "route": "route -n",
     }
 
 
@@ -482,3 +487,95 @@ def test_resolve_discovery_command_helper():
     assert sliver._resolve_discovery_command("cat /tmp/canary_x.txt") == "cat /tmp/canary_x.txt"
     assert sliver._resolve_discovery_command("cat /etc/passwd") is None
     assert sliver._resolve_discovery_command("rm -rf /") is None
+
+
+def test_run_discovery_process_command(fake_client, stub_run):
+    capture = stub_run("PID USER COMMAND")
+    result = sliver.sliver_run_discovery("s1", "ps")
+    assert capture["commands"] == ["use s1", "ps aux"]
+    assert "ps aux" in result
+
+
+@pytest.mark.parametrize("key,expected", [("ip", "ip a"), ("route", "route -n")])
+def test_run_discovery_network_commands(fake_client, stub_run, key, expected):
+    capture = stub_run("net")
+    result = sliver.sliver_run_discovery("s1", key)
+    assert capture["commands"] == ["use s1", expected]
+    assert expected in result
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "ps aux; rm -rf /",
+        "ps -ef",
+        "ip link set eth0 down",
+        "route add default gw 1.2.3.4",
+        "ip addr flush dev eth0",
+    ],
+)
+def test_run_discovery_refuses_network_process_variants(fake_client, stub_run, bad):
+    capture = stub_run("should not run")
+    result = sliver.sliver_run_discovery("s1", bad)
+    assert "Refused" in result
+    assert capture == {}
+
+
+# --- sliver_resolve_target ---
+
+
+def _dispatch_runner(outputs: dict[str, str]):
+    """Build a fake runner that returns output keyed by the Sliver command."""
+
+    def _fake(commands, timeout=sliver._LIST_TIMEOUT):
+        return outputs.get(commands[0], "")
+
+    return _fake
+
+
+def test_resolve_target_prefers_beacon(fake_client, stub_run):
+    stub_run(BEACONS_OUTPUT)
+    assert sliver.sliver_resolve_target() == "ef56gh78"
+
+
+def test_resolve_target_falls_back_to_session(fake_client, monkeypatch):
+    monkeypatch.setattr(
+        sliver,
+        "_run_sliver_commands",
+        _dispatch_runner({"beacons": "No Sliver beacons registered.", "sessions": SESSIONS_OUTPUT}),
+    )
+    assert sliver.sliver_resolve_target() == "ab12cd34"
+
+
+def test_resolve_target_reports_none_available(fake_client, monkeypatch):
+    monkeypatch.setattr(
+        sliver,
+        "_run_sliver_commands",
+        _dispatch_runner(
+            {
+                "beacons": "No Sliver beacons registered.",
+                "sessions": "No active Sliver sessions.",
+            }
+        ),
+    )
+    out = sliver.sliver_resolve_target()
+    assert "No active Sliver beacon or session" in out
+    assert not sliver.is_target_id(out)
+
+
+def test_resolve_target_reports_daemon_down(fake_client, stub_run):
+    stub_run(CONNECTION_REFUSED)
+    out = sliver.sliver_resolve_target()
+    assert "not reachable" in out
+
+
+def test_resolve_target_reports_missing_client(monkeypatch):
+    monkeypatch.setattr(sliver, "_client_path", lambda: None)
+    out = sliver.sliver_resolve_target()
+    assert "was not found on PATH" in out
+
+
+def test_is_target_id():
+    assert sliver.is_target_id("ab12cd34")
+    assert not sliver.is_target_id("No active Sliver sessions.")
+    assert not sliver.is_target_id("")

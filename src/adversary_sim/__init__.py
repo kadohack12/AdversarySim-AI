@@ -3,6 +3,8 @@
 The package is intentionally small and dependency-light:
 
 * :mod:`adversary_sim.sliver` — standalone wrapper around ``sliver-client``.
+* :mod:`adversary_sim.techniques` — allow-listed MITRE ATT&CK catalogue.
+* :mod:`adversary_sim.reports` — purple-team audit report generator.
 * :mod:`adversary_sim.core` — async connector to a local Ollama server.
 * :mod:`adversary_sim.safety` — human-in-the-loop approval gate.
 * :mod:`adversary_sim.cli` — rich terminal interface.

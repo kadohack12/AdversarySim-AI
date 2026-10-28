@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
 
 import typer
@@ -20,7 +21,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-from . import sliver
+from . import reports, sliver, techniques
 from .core import (
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
@@ -32,6 +33,7 @@ from .core import (
     parse_tool_calls_from_text,
 )
 from .safety import Action, RiskLevel, SafetyError, confirm, screen_text
+from .techniques import Technique
 
 __all__ = ["app", "main"]
 
@@ -117,6 +119,13 @@ app = typer.Typer(
     help="AdversarySim-AI — purple-team assistant for Sliver C2 and local LLMs.",
     no_args_is_help=False,
 )
+
+mitre_app = typer.Typer(
+    add_completion=False,
+    help="MITRE ATT&CK emulation: list allow-listed techniques, run one, write a report.",
+    no_args_is_help=True,
+)
+app.add_typer(mitre_app, name="mitre")
 
 
 def print_banner() -> None:
@@ -262,6 +271,156 @@ def discover(
     console.print(Panel(result, title=Text("System discovery", style="accent"), border_style=GREEN))
 
 
+# ---------------------------------------------------------------------------
+# MITRE ATT&CK emulation
+# ---------------------------------------------------------------------------
+
+_MITRE_ID_RE = re.compile(r"\b[Tt](\d{4})\b")
+
+
+def _detect_mitre_request(text: str) -> Technique | None:
+    """Return the technique referenced in *text*, or None.
+
+    Triggers only when the operator mentions "mitre" and a known technique id
+    (e.g. "Lance le test MITRE T1082"), so ordinary chat is unaffected.
+    """
+    if "mitre" not in text.lower():
+        return None
+    for match in _MITRE_ID_RE.finditer(text):
+        technique = techniques.get_technique(f"T{match.group(1)}")
+        if technique is not None:
+            return technique
+    return None
+
+
+def render_techniques_table() -> None:
+    """Render the allow-listed MITRE technique catalogue as a dark table."""
+    table = Table(
+        title=Text("MITRE ATT&CK emulation catalogue", style="accent"),
+        header_style=f"bold {RED}",
+        border_style="grey35",
+        title_justify="left",
+        row_styles=["none", "on #0a0a0a"],
+    )
+    table.add_column("ID", style=f"bold {AMBER}")
+    table.add_column("Technique", style="grey85")
+    table.add_column("Tactic", style="grey62")
+    table.add_column("Sliver command", style=f"{CYAN}")
+    table.add_column("Safety", style="grey85")
+    for technique in techniques.list_techniques():
+        table.add_row(
+            technique.id,
+            technique.name,
+            technique.tactic,
+            sliver.DISCOVERY_COMMANDS.get(technique.command, technique.command),
+            f"[warn]{technique.risk}[/warn]",
+        )
+    console.print(table)
+    console.print("[muted]Every technique runs through the Safety Gate and requires [y/N].[/muted]")
+
+
+async def run_mitre_technique(
+    technique: Technique,
+    session: str = "",
+    *,
+    client: OllamaClient | None = None,
+    model: str = DEFAULT_MODEL,
+    use_llm: bool = True,
+) -> str:
+    """Run one MITRE technique end to end and write an audit report.
+
+    Resolves the target (auto-selecting the active beacon when *session* is
+    empty), routes the command through the Safety Gate, executes it, and writes a
+    Markdown report. Returns a summary string (also used as a tool result).
+    """
+    target = (session or "").strip()
+    if not target:
+        resolved = sliver.sliver_resolve_target()
+        if not sliver.is_target_id(resolved):
+            console.print(
+                Panel(resolved, title=Text("No target", style="danger"), border_style=RED)
+            )
+            return f"Error: could not resolve a target — {resolved}"
+        target = resolved
+        console.print(
+            f"[muted]No session given — auto-selected target[/muted] [accent]{target}[/accent]"
+        )
+
+    console.print(
+        Text.assemble(
+            ("  ▚ MITRE ", "brand"),
+            (f"{technique.id} ", "accent"),
+            (technique.name, "muted"),
+        )
+    )
+    result = run_action(
+        f"MITRE {technique.id} — {technique.name} on {target}",
+        lambda: sliver.sliver_run_discovery(target, technique.command),
+        risk=RISK_BY_TOOL["sliver_run_discovery"],
+        command=f"mitre {technique.id} -> sliver_run_discovery {target} {technique.command}",
+    )
+    console.print(
+        Panel(
+            result,
+            title=Text(f"{technique.id} · execution", style="accent"),
+            border_style=GREEN,
+        )
+    )
+    if result.startswith("Cancelled:"):
+        return result
+
+    if not use_llm and client is None:
+        report = await reports.generate_report(
+            technique, target=target, evidence=result, use_llm=False
+        )
+    else:
+        owned = client is None
+        active = client or OllamaClient(model=model)
+        try:
+            report = await reports.generate_report(
+                technique, target=target, evidence=result, client=active, use_llm=use_llm
+            )
+        finally:
+            if owned:
+                await active.aclose()
+
+    note = "" if report.llm_used else " [muted](détections curatées)[/muted]"
+    console.print(
+        Panel(
+            f"Rapport écrit : [accent]{report.path}[/accent]{note}",
+            title=Text("Purple Team report", style="accent"),
+            border_style=CYAN,
+        )
+    )
+    return f"{result}\n\nRapport Purple Team écrit : {report.path}"
+
+
+@mitre_app.command("list")
+def mitre_list() -> None:
+    """List the allow-listed MITRE ATT&CK emulation techniques."""
+    print_banner()
+    render_techniques_table()
+
+
+@mitre_app.command("run")
+def mitre_run(
+    technique_id: str = typer.Argument(..., help="Technique id, e.g. T1082."),
+    session: str = typer.Argument("", help="Optional target session/beacon id."),
+    report: bool = typer.Option(
+        True, "--report/--no-report", help="Write a Markdown audit report."
+    ),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", help="Ollama model for the report."),
+) -> None:
+    """Run one MITRE technique (Safety Gate) and write a Purple Team report."""
+    print_banner()
+    technique = techniques.get_technique(technique_id)
+    if technique is None:
+        console.print(f"[danger]Unknown technique '{technique_id}'.[/danger]")
+        render_techniques_table()
+        raise typer.Exit(code=2)
+    asyncio.run(run_mitre_technique(technique, session, model=model, use_llm=report))
+
+
 def _list_command(kind: str, title: str) -> None:
     operation = getattr(sliver, f"sliver_list_{kind}")
     result = run_action(
@@ -346,7 +505,10 @@ async def _shell() -> None:
             f"[warn]Ollama not reachable at {client.host}[/warn] — "
             "chat disabled, Sliver shortcuts still work."
         )
-    console.print("[muted]Commands: /status /sessions /beacons /jobs /help /quit[/muted]\n")
+    console.print(
+        "[muted]Commands: /status /sessions /beacons /jobs /mitre /help /quit"
+        '  ·  or ask in natural language (e.g. "Lance le test MITRE T1082")[/muted]\n'
+    )
 
     history: list[ChatMessage] = []
     try:
@@ -359,8 +521,27 @@ async def _shell() -> None:
             if not raw:
                 continue
             if raw.startswith("/"):
+                slash_parts = shlex.split(raw)
+                if len(slash_parts) >= 2 and slash_parts[0].lower() == "/mitre":
+                    technique = techniques.get_technique(slash_parts[1])
+                    if technique is None:
+                        console.print(f"[danger]Unknown technique '{slash_parts[1]}'.[/danger]")
+                        render_techniques_table()
+                        continue
+                    try:
+                        await run_mitre_technique(technique, client=client)
+                    except OllamaError as exc:
+                        console.print(f"[danger]{exc}[/danger]")
+                    continue
                 if _handle_slash(raw):
                     break
+                continue
+            technique = _detect_mitre_request(raw)
+            if technique is not None:
+                try:
+                    await run_mitre_technique(technique, client=client)
+                except OllamaError as exc:
+                    console.print(f"[danger]{exc}[/danger]")
                 continue
             if not available:
                 console.print("[warn]LLM unavailable; use /commands or start Ollama.[/warn]")
@@ -490,11 +671,15 @@ def _handle_slash(raw: str) -> bool:
             f"  [{CYAN}]/sessions[/]   list active sessions\n"
             f"  [{CYAN}]/beacons[/]    list beacons\n"
             f"  [{CYAN}]/jobs[/]       list listeners\n"
+            f"  [{CYAN}]/mitre[/]      list MITRE ATT&CK techniques\n"
+            f"  [{CYAN}]/mitre T1082[/]  run a technique (Safety-Gated) + report\n"
             f"  [{CYAN}]/help[/]       show this help\n"
             f"  [{CYAN}]/quit[/]       exit\n"
-            f"[muted]  or just ask in natural language — discovery tools are "
-            f"Safety-Gated.[/muted]"
+            f'[muted]  or ask in natural language — e.g. "Lance le test MITRE T1082".[/muted]'
         )
+        return False
+    if name == "/mitre":
+        render_techniques_table()
         return False
     mapping = {
         "/status": ("sliver_status", "Sliver status"),

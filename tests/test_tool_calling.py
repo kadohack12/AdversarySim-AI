@@ -439,6 +439,9 @@ def test_discovery_tool_is_exposed_and_state_changing():
         "pwd",
         "ls -la",
         "cat /tmp/canary_data.txt",
+        "ps aux",
+        "ip a",
+        "route -n",
     ]
 
 
