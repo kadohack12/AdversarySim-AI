@@ -1,7 +1,7 @@
 # AdversarySim-AI
 
 ![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
-![Tests](https://img.shields.io/badge/tests-87%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Zero Telemetry](https://img.shields.io/badge/telemetry-zero-blueviolet)
 
@@ -99,6 +99,9 @@ AdversarySim-AI enumerates and generates; it does not drive live implants.
   `sliver_list_beacons`, `sliver_list_jobs`, `sliver_generate_payload`.
 - **Local LLM connector** — async client for Ollama's `/api/chat` (streaming and non-streaming),
   defaulting to `qwen2.5-coder:7b`.
+- **LLM tool calling** — the local model can invoke the read-only Sliver tools
+  (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`)
+  directly from the interactive shell, with every call routed through the Safety Gate.
 - **Human-in-the-loop safety layer** — a single approval gate that every action goes through.
 - **Modern terminal UI** — a `rich` banner, colourised tables for sessions and jobs, and an
   interactive shell with slash commands.
@@ -153,6 +156,23 @@ Inside `adversarysim shell`, the model is a natural-language interface to the la
 You can ask it to summarise the current state — "how many beacons are checking in,
 and over which transport?" — and it reasons over the same data the CLI exposes.
 
+Through **Ollama tool calling**, the model can go further than narrating: when a
+question needs live data, it requests the matching read-only Sliver tool
+(`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`)
+by name. AdversarySim intercepts that request, runs it through the Safety Gate for
+`[Y/n]` approval, executes the Sliver function, and feeds the result back so the
+model can answer precisely:
+
+```text
+adversarysim> Sur quelle machine se trouve mon implant ?
+→ model requested tool sliver_list_beacons
+  Run Sliver tool 'sliver_list_beacons' requested by the local model
+  command: sliver_list_beacons
+  risk: read-only
+Proceed? [Y/n] y
+Ton implant tourne sur target-node (transport mtls).
+```
+
 It **coexists with the slash shortcuts** rather than replacing them: `/status`,
 `/beacons`, `/jobs`, `/sessions` and `/help` remain deterministic, instant, and
 model-independent, so you always have a reliable path when the model is slow or
@@ -160,20 +180,23 @@ unavailable.
 
 ```text
 adversarysim> /beacons                 # deterministic Sliver query
-adversarysim> summarise the beacons    # LLM narrative over the same data
+adversarysim> où est mon implant ?     # LLM + tool calling, Safety-Gated
 ```
 
 ### Role #3 — Strict separation of execution (Safety Gate)
 
-The model **reasons and proposes; it never executes.** It has no ability to run a
-system command, generate a payload, or drive a C2 channel on its own. Every
-concrete action — including anything the model suggests — must pass through the
-[Safety Gate](#safety-model) and be explicitly approved by a human operator
-(**strict Human-in-the-Loop**).
+The model **reasons and proposes; it never executes.** Even when it uses tool
+calling, it can only *request* a tool by name — AdversarySim intercepts the call
+and routes it through the [Safety Gate](#safety-model) for explicit human
+approval before the Sliver function runs. The model has no ability to run a
+system command, generate a payload, or drive a C2 channel on its own, and it
+cannot invoke anything outside the four read-only tools declared to it
+(`sliver_generate_payload` is deliberately **not** exposed as a tool).
 
 The LLM can describe *how* to generate an implant; only the operator's `y` at the
 confirmation prompt lets AdversarySim actually build one. There is no path from
-"the model said so" to "the system did it" that bypasses the operator.
+"the model said so" to "the system did it" that bypasses the operator
+(**strict Human-in-the-Loop**).
 
 ---
 
@@ -305,7 +328,8 @@ tests/
 ├── test_cli.py
 ├── test_core.py
 ├── test_safety.py
-└── test_sliver.py
+├── test_sliver.py
+└── test_tool_calling.py  # LLM tool calling through the Safety Gate
 docs/
 └── WALKTHROUGH.md  # end-to-end purple-teaming lab guide
 ```

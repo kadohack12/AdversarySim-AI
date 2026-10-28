@@ -20,7 +20,14 @@ from rich.table import Table
 from rich.text import Text
 
 from . import sliver
-from .core import DEFAULT_MODEL, OllamaClient, OllamaError
+from .core import (
+    DEFAULT_MODEL,
+    DEFAULT_SYSTEM_PROMPT,
+    ChatMessage,
+    OllamaClient,
+    OllamaError,
+    ToolCall,
+)
 from .safety import Action, RiskLevel, SafetyError, confirm, screen_text
 
 __all__ = ["app", "main"]
@@ -38,12 +45,7 @@ BANNER = r"""
 
 TAGLINE = "Purple-team assistant · Sliver C2 + local LLMs · human-in-the-loop"
 
-SYSTEM_PROMPT = (
-    "You are AdversarySim-AI, a defensive purple-teaming assistant. You help an "
-    "authorised operator reason about adversary emulation using Sliver C2. You "
-    "never claim an action was performed; you propose steps and the operator "
-    "approves them. Refuse requests that target systems without authorisation."
-)
+SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 RISK_BY_TOOL = {
     "sliver_status": RiskLevel.READ_ONLY,
@@ -52,6 +54,27 @@ RISK_BY_TOOL = {
     "sliver_list_jobs": RiskLevel.READ_ONLY,
     "sliver_generate_payload": RiskLevel.DESTRUCTIVE,
 }
+
+# Sliver tools the local model may invoke through tool calling. Every name here
+# must be a zero-argument, read-only function in :mod:`adversary_sim.sliver`;
+# the CLI still routes each call through the Safety Gate. Resolved dynamically
+# so the binding always reflects the current module state.
+TOOL_NAMES = frozenset(
+    {
+        "sliver_status",
+        "sliver_list_sessions",
+        "sliver_list_beacons",
+        "sliver_list_jobs",
+    }
+)
+
+
+def _resolve_tool(name: str):
+    """Return the read-only sliver function for *name*, or None if not allowed."""
+    if name not in TOOL_NAMES:
+        return None
+    return getattr(sliver, name, None)
+
 
 app = typer.Typer(
     add_completion=False,
@@ -236,7 +259,7 @@ async def _shell() -> None:
         )
     console.print("[dim]Commands: /status /sessions /beacons /jobs /help /quit[/dim]\n")
 
-    history: list = []
+    history: list[ChatMessage] = []
     try:
         while True:
             try:
@@ -253,19 +276,73 @@ async def _shell() -> None:
             if not available:
                 console.print("[yellow]LLM unavailable; use /commands or start Ollama.[/yellow]")
                 continue
+            history.append(ChatMessage("user", raw))
+            mark = len(history) - 1
             try:
-                with console.status("Thinking…"):
-                    reply = await client.chat(raw, history=history)
+                await _converse(client, history)
             except OllamaError as exc:
                 console.print(f"[red]{exc}[/red]")
-                continue
-            console.print(Markdown(reply))
-            from .core import ChatMessage
-
-            history.append(ChatMessage("user", raw))
-            history.append(ChatMessage("assistant", reply))
+                del history[mark:]
     finally:
         await client.aclose()
+
+
+async def _converse(
+    client: OllamaClient,
+    history: list[ChatMessage],
+    *,
+    max_tool_rounds: int = 5,
+) -> None:
+    """Drive one operator turn, resolving any tool calls the model requests.
+
+    The model's requested tools are executed only after the operator approves
+    them through the Safety Gate; each result is fed back to the model so it can
+    synthesise a natural-language answer. Conversation state is appended to
+    *history* in place.
+    """
+    with console.status("Thinking…"):
+        reply = await client.continue_chat(history)
+
+    for _ in range(max_tool_rounds):
+        if not reply.wants_tools:
+            break
+        history.append(
+            ChatMessage(
+                "assistant",
+                reply.content,
+                tool_calls=[call.as_dict() for call in reply.tool_calls],
+            )
+        )
+        for call in reply.tool_calls:
+            result = _execute_tool_call(call)
+            history.append(ChatMessage("tool", result, tool_name=call.name))
+        with console.status("Thinking…"):
+            reply = await client.continue_chat(history)
+
+    if reply.content:
+        console.print(Markdown(reply.content))
+    history.append(ChatMessage("assistant", reply.content))
+
+
+def _execute_tool_call(call: ToolCall) -> str:
+    """Approve and run a model-requested Sliver tool, returning its result.
+
+    Unknown tools are refused without touching Sliver; known tools are screened
+    by the Safety Gate before the underlying function runs.
+    """
+    operation = _resolve_tool(call.name)
+    if operation is None:
+        console.print(f"[red]Refused: unknown tool '{call.name}'.[/red]")
+        return f"Error: tool '{call.name}' is not available."
+
+    console.print(f"[dim]→ model requested tool[/dim] [bold]{call.name}[/bold]")
+    summary = f"Run Sliver tool '{call.name}' requested by the local model"
+    return run_action(
+        summary,
+        operation,
+        risk=RISK_BY_TOOL.get(call.name, RiskLevel.READ_ONLY),
+        command=call.name,
+    )
 
 
 def _handle_slash(raw: str) -> bool:
