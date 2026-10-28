@@ -259,12 +259,19 @@ echo 'FLAG{canary}' > /tmp/canary_data.txt
 
 Only these commands are accepted:
 
-| Technique | Commands |
-| --------- | -------- |
-| **T1082** System Information Discovery | `whoami`, `id`, `uname -a`, `hostname`, `uptime` |
-| **T1083** File and Directory Discovery | `pwd`, `ls -la`, `cat /tmp/canary_*.txt` |
-| **T1057** Process Discovery | `ps aux` |
-| **T1016** System Network Configuration Discovery | `ip a`, `route -n` |
+| Technique | Bare commands | Sliver console command |
+| --------- | ------------- | ---------------------- |
+| **T1082** System Information Discovery | `whoami`, `id`, `uname -a`, `hostname`, `uptime` | `whoami`, `execute -o id`, `execute -o uname -a`, … |
+| **T1083** File and Directory Discovery | `pwd`, `ls -la`, `cat /tmp/canary_*.txt` | `execute -o pwd`, `ls -la`, `execute -o cat /tmp/canary_*.txt` |
+| **T1057** Process Discovery | `ps aux` | `ps` |
+| **T1016** System Network Configuration Discovery | `ip a`, `route -n` | `execute -o ip a`, `execute -o route -n` |
+
+> **Sliver console syntax.** Sliver's console has its own interpreter, so typing
+> a bare Linux command such as `uname -a` fails with "unknown command". AdversarySim
+> therefore emits either Sliver's native equivalent (`whoami`, `ls -la`, `ps`) or
+> `execute -o <cmd>` for real system binaries. The `-o` flag is required to capture
+> the command's stdout — without it the output is not returned. You can still type
+> the bare Linux form; it is translated for you.
 
 Paths are fixed literals — a canary read is confined to `/tmp/canary_*.txt` — so
 discovery can never be aimed at an arbitrary file (no `cat /etc/shadow`, no
@@ -287,11 +294,12 @@ the model requests `sliver_run_discovery`, still gated by the same `[y/N]` promp
 ### Optional — MITRE ATT&CK run with an automatic Purple Team report
 
 The catalogue wraps the same allow-listed commands behind MITRE technique ids and
-writes an audit report after each run.
+writes an audit report after each run. **Any** valid `T####` id is accepted.
 
 ```bash
-adversarysim mitre list          # show the catalogue + safety status
+adversarysim mitre list          # show the curated catalogue + safety status
 adversarysim mitre run T1082     # auto-selects the active beacon
+adversarysim mitre run T1033     # outside the catalogue → generic emulation
 adversarysim mitre run T1057 --no-report   # skip the LLM, curated detections only
 ```
 
@@ -306,8 +314,27 @@ Proceed? [y/N] y
 ```
 
 The report contains the run metadata (date, operator, target), the technique, the
-raw Sliver evidence, and defensive recommendations — written by the local LLM when
-Ollama is up, otherwise the curated Sigma/auditd suggestions from the catalogue.
+Sliver console command, the raw Sliver evidence, and defensive recommendations —
+written by the local LLM when Ollama is up, otherwise the curated Sigma/auditd
+suggestions from the catalogue. The `reports/` directory is created automatically.
+
+### Optional — dynamic agent: ask for any technique
+
+You do not need to know a technique's id or command in advance. Inside
+`adversarysim shell`, just ask in natural language and the local agent identifies
+the technique, maps it to a defensible read-only command, and drives the report:
+
+```text
+▚ adversarysim › Je veux tester T1033
+▚ adversarysim › Simule MITRE T1082
+▚ adversarysim › Comment simuler la persistance T1053 ?
+```
+
+The agent calls `mitre_run_technique`, which resolves the target automatically,
+runs the command through the Safety Gate, and writes
+`reports/<ID>_<timestamp>.md`. Out-of-catalogue ids are emulated generically and
+the report says so — the id is a label, never a command, so the allow-list still
+governs what can actually run.
 
 ---
 

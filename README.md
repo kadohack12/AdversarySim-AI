@@ -1,7 +1,7 @@
 # AdversarySim-AI
 
 ![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
-![Tests](https://img.shields.io/badge/tests-194%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-199%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Zero Telemetry](https://img.shields.io/badge/telemetry-zero-blueviolet)
 ![by kadohack12](https://img.shields.io/badge/by-kadohack12-red)
@@ -103,21 +103,32 @@ on an already-established session. It does not provide a general-purpose remote 
 - **Local LLM connector** — async client for Ollama's `/api/chat` (streaming and non-streaming),
   defaulting to `qwen2.5-coder:7b`.
 - **LLM tool calling** — the local model can invoke the read-only Sliver tools
-  (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`) plus the
-  allow-listed discovery tool (`sliver_run_discovery`) directly from the interactive shell, with
-  every call routed through the Safety Gate.
+  (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`), the
+  allow-listed discovery tool (`sliver_run_discovery`) and the dynamic MITRE agent
+  (`mitre_run_technique`) directly from the interactive shell, with every call routed through the
+  Safety Gate.
 - **Defensible discovery (MITRE T1082 + T1083 + T1057 + T1016)** — `sliver_run_discovery` emulates
   System Information Discovery (`whoami`, `id`, `uname -a`, `hostname`, `uptime`), File and Directory
   Discovery (`pwd`, `ls -la`, and a canary read confined to `/tmp/canary_*.txt`), Process Discovery
-  (`ps aux`) and System Network Configuration Discovery (`ip a`, `route -n`). Paths are fixed
-  literals, never operator- or model-supplied. Anything else is refused before it reaches the
-  target, and the action is `state-changing` (`[y/N]`).
-- **MITRE ATT&CK emulation catalogue** — `adversarysim mitre list` shows the allow-listed
-  techniques with their safety status; `adversarysim mitre run <ID>` resolves the active beacon
-  automatically, routes the run through the Safety Gate, and writes a Purple Team report.
+  (`ps aux`) and System Network Configuration Discovery (`ip a`, `route -n`). Commands are emitted in
+  **Sliver console syntax** — native commands where Sliver has one, `execute -o <cmd>` for real
+  system binaries (the `-o` flag is required to capture stdout). Paths are fixed literals, never
+  operator- or model-supplied. Anything else is refused before it reaches the target, and the action
+  is `state-changing` (`[y/N]`).
+- **Open, dynamic MITRE ATT&CK agent** — you are not limited to four hard-coded techniques. In
+  `adversarysim shell` you can ask for **any** technique in natural language ("Je veux tester T1033",
+  "Simule MITRE T1082", "Comment simuler la persistance T1053 ?"). The local model identifies the
+  technique, maps it to a defensible read-only discovery command, and calls `mitre_run_technique`.
+  Curated ids use their dedicated command; any other valid `T####` id is emulated generically and the
+  report is labelled as such. Every run still goes through the Safety Gate.
+- **MITRE ATT&CK emulation catalogue** — `adversarysim mitre list` shows the curated
+  techniques with their safety status; `adversarysim mitre run <ID>` accepts **any** valid technique
+  id, resolves the active beacon automatically, routes the run through the Safety Gate, and writes a
+  Purple Team report.
 - **Purple Team reports** — every `mitre run` writes `reports/<ID>_<timestamp>.md` with metadata,
-  the technique, the raw Sliver evidence, and defensive recommendations written by the local LLM
-  (Sigma / auditd / YARA), falling back to curated detections when Ollama is unavailable.
+  the technique, the Sliver console command, the raw Sliver evidence, and defensive recommendations
+  written by the local LLM (Sigma / auditd / YARA), falling back to curated detections when Ollama
+  is unavailable. The `reports/` directory is created automatically.
 - **Human-in-the-loop safety layer** — a single approval gate that every action goes through.
 - **Hyper-dark terminal UI** — a neon-on-black `rich` theme (`by kadohack12`), colourised tables
   for sessions and jobs, a risk-coloured Safety Gate header, and an interactive shell with slash
@@ -172,6 +183,11 @@ the "Recommandations défensives" section of the generated report (Sigma / audit
 raw Sliver evidence. When Ollama is offline, the report is still written using the curated
 detections in the technique catalogue, so the audit trail never depends on the model being up.
 
+Because the model knows MITRE ATT&CK, it also acts as an **open, dynamic agent**: ask for any
+technique and it identifies the id, picks a defensible read-only discovery command, and drives the
+report flow. There is no fixed list of four techniques — T1033, T1053, or any other `T####` id is
+handled, with out-of-catalogue ids emulated generically and clearly labelled.
+
 ### Role #2 — Conversational interface
 
 Inside `adversarysim shell`, the model is a natural-language interface to the lab.
@@ -181,13 +197,15 @@ and over which transport?" — and it reasons over the same data the CLI exposes
 Through **Ollama tool calling**, the model can go further than narrating: when a
 question needs live data, it requests the matching Sliver tool
 (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`)
-or a defensible discovery command (`sliver_run_discovery`) by name. AdversarySim
-intercepts that request, runs it through the Safety Gate for approval, executes
-the Sliver function, and feeds the real output back so the model can answer
-precisely. Detection is robust: it accepts both the structured `tool_calls` field
-and a tool invocation the model emits as raw JSON in its text (e.g.
-`{"name": "sliver_list_beacons", "arguments": {}}`), so the call is never merely
-echoed back:
+or a defensible discovery command (`sliver_run_discovery`) by name. It can also
+drive the full MITRE flow with `mitre_run_technique` — you say *"Simule MITRE
+T1033"* and it identifies the technique, picks the command, and writes the report.
+AdversarySim intercepts every request, runs it through the Safety Gate for
+approval, executes the Sliver function, and feeds the real output back so the
+model can answer precisely. Detection is robust: it accepts both the structured
+`tool_calls` field and a tool invocation the model emits as raw JSON in its text
+(e.g. `{"name": "sliver_list_beacons", "arguments": {}}`), so the call is never
+merely echoed back:
 
 ```text
 adversarysim> Sur quelle machine se trouve mon implant ?
@@ -229,11 +247,20 @@ cannot invoke anything outside the tools declared to it.
 The discovery tool is the clearest example: `sliver_run_discovery` is exposed to
 the model, but it is `state-changing` (deny-by-default `[y/N]`) and accepts only a
 strict allow-list — System Information Discovery (`whoami`, `id`, `uname -a`,
-`hostname`, `uptime`) and File and Directory Discovery (`pwd`, `ls -la`, and a
-canary read confined to `/tmp/canary_*.txt`). Paths are fixed literals, so any
-other command is refused before it reaches the target: even a prompt-injected or
-hallucinated command cannot turn the agent into a general-purpose remote runner.
-`sliver_generate_payload` is deliberately **not** exposed as a tool at all.
+`hostname`, `uptime`), File and Directory Discovery (`pwd`, `ls -la`, and a
+canary read confined to `/tmp/canary_*.txt`), Process Discovery (`ps aux`) and
+Network Configuration Discovery (`ip a`, `route -n`). Paths are fixed literals, so
+any other command is refused before it reaches the target: even a prompt-injected
+or hallucinated command cannot turn the agent into a general-purpose remote
+runner. `sliver_generate_payload` is deliberately **not** exposed as a tool at all.
+
+The dynamic MITRE tool `mitre_run_technique` respects the same boundary. It accepts
+any `T####` id, but the *command* it can run is still drawn from the allow-list — a
+technique id is a label, never a command. An unknown or out-of-catalogue id is
+emulated with a fixed, read-only discovery command and the report is marked
+generic. So "Simule T1053" cannot smuggle in a persistence command: the agent
+proposes, the Safety Gate decides, and only allow-listed read-only commands ever
+reach the target.
 
 The LLM can describe *how* to generate an implant; only the operator's `y` at the
 confirmation prompt lets AdversarySim actually build one. There is no path from
@@ -320,38 +347,43 @@ adversarysim discover ab12cd34 "ps aux"
 adversarysim discover ab12cd34 "ip a"
 ```
 
-Only the allow-listed read-only commands are accepted:
+You can pass either the bare Linux command (`uname -a`) or the Sliver console form
+(`execute -o uname -a`) — both resolve to the same safe literal. Only the allow-listed read-only
+commands are accepted:
 
-| Technique | Commands |
-| --------- | -------- |
-| **T1082** System Information Discovery | `whoami`, `id`, `uname -a`, `hostname`, `uptime` |
-| **T1083** File and Directory Discovery | `pwd`, `ls -la`, `cat /tmp/canary_*.txt` |
-| **T1057** Process Discovery | `ps aux` |
-| **T1016** System Network Configuration Discovery | `ip a`, `route -n` |
+| Technique | Bare commands | Sliver console command |
+| --------- | ------------- | ---------------------- |
+| **T1082** System Information Discovery | `whoami`, `id`, `uname -a`, `hostname`, `uptime` | `whoami`, `execute -o id`, `execute -o uname -a`, … |
+| **T1083** File and Directory Discovery | `pwd`, `ls -la`, `cat /tmp/canary_*.txt` | `execute -o pwd`, `ls -la`, `execute -o cat /tmp/canary_*.txt` |
+| **T1057** Process Discovery | `ps aux` | `ps` |
+| **T1016** System Network Configuration Discovery | `ip a`, `route -n` | `execute -o ip a`, `execute -o route -n` |
 
 Paths are fixed literals — a canary read is confined to `/tmp/canary_*.txt` — so discovery can
 never be aimed at an arbitrary file. The action is `state-changing` and prompts for `[y/N]`.
 
 ### MITRE ATT&CK emulation with automatic reports
 
-List the allow-listed techniques and their safety status:
+List the curated techniques and their safety status:
 
 ```bash
 adversarysim mitre list
 ```
 
-Run one technique and write a Purple Team report:
+Run a technique and write a Purple Team report — **any** valid `T####` id is accepted:
 
 ```bash
 adversarysim mitre run T1082                 # auto-selects the active beacon
 adversarysim mitre run T1083 ab12cd34        # explicit target
+adversarysim mitre run T1033                 # outside the catalogue → generic emulation
 adversarysim mitre run T1057 --no-report     # skip the LLM, use curated detections
 ```
 
 `mitre run` resolves the target automatically (beacon first, then session) when no session id is
 given, routes the command through the Safety Gate (`[y/N]`), executes it, and writes
-`reports/<ID>_<timestamp>.md` containing the metadata, the technique, the raw Sliver evidence, and
-defensive recommendations drafted by the local LLM.
+`reports/<ID>_<timestamp>.md` containing the metadata, the technique, the Sliver console command,
+the raw Sliver evidence, and defensive recommendations drafted by the local LLM. Curated ids use
+their dedicated discovery command; any other valid id is emulated with a generic read-only command
+and the report is labelled as such. The `reports/` directory is created automatically if missing.
 
 ### Generate an implant (operator approval required)
 
@@ -383,13 +415,22 @@ Inside the shell:
 | `/sessions`    | list active sessions                            |
 | `/beacons`     | list beacons                                    |
 | `/jobs`        | list listeners                                  |
-| `/mitre`       | list the MITRE ATT&CK technique catalogue       |
-| `/mitre T1082` | run a technique (Safety-Gated) and write a report |
+| `/mitre`       | list the curated MITRE ATT&CK technique catalogue |
+| `/mitre T1033` | run **any** technique (Safety-Gated) and write a report |
 | `/help`        | show help                                       |
 | `/quit`        | exit                                            |
 
-You can also drive the MITRE flow in natural language — e.g. `Lance le test MITRE T1082` — and the
-shell will detect the technique, run it through the Safety Gate, and write the report.
+You can also drive the MITRE flow in natural language, for **any** technique id — the agent
+identifies it, maps it to a defensible command, and calls the report tool:
+
+```text
+▚ adversarysim › Je veux tester T1033
+▚ adversarysim › Simule MITRE T1082
+▚ adversarysim › Comment simuler la persistance T1053 ?
+```
+
+Every one of these still passes through the Safety Gate (`[y/N]`) before anything runs, and writes
+`reports/<ID>_<timestamp>.md` on approval.
 
 ---
 
