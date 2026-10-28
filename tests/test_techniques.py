@@ -60,11 +60,38 @@ def test_get_technique_returns_none_for_unknown():
 
 
 def test_resolve_technique_command_maps_to_sliver_command():
-    assert techniques.resolve_technique_command("T1082") == "uname -a"
+    assert techniques.resolve_technique_command("T1082") == "execute -o uname -a"
     assert techniques.resolve_technique_command("T1083") == "ls -la"
-    assert techniques.resolve_technique_command("T1057") == "ps aux"
-    assert techniques.resolve_technique_command("T1016") == "ip a"
+    assert techniques.resolve_technique_command("T1057") == "ps"
+    assert techniques.resolve_technique_command("T1016") == "execute -o ip a"
     assert techniques.resolve_technique_command("T0000") is None
+
+
+def test_generic_technique_keeps_agent_open():
+    # An id outside the curated catalogue still yields a runnable technique.
+    tech = techniques.technique_or_generic("T1033", name="System Owner/User Discovery")
+    assert tech is not None
+    assert tech.id == "T1033"
+    assert tech.name == "System Owner/User Discovery"
+    assert tech.command in sliver.DISCOVERY_COMMANDS
+    assert tech.detections  # generic reports still carry curated detections
+
+
+def test_generic_technique_defaults_and_validation():
+    tech = techniques.technique_or_generic("t1053")
+    assert tech is not None
+    assert tech.id == "T1053"
+    assert tech.command == techniques.DEFAULT_COMMAND_KEY
+    with pytest.raises(ValueError):
+        techniques.generic_technique("T1033", command_key="rm -rf /")
+
+
+def test_technique_or_generic_curated_wins_and_rejects_junk():
+    # Curated ids resolve to the curated entry, not a generic one.
+    assert techniques.technique_or_generic("T1082") is techniques.get_technique("T1082")
+    # Non-MITRE ids are rejected.
+    assert techniques.technique_or_generic("not-a-technique") is None
+    assert techniques.technique_or_generic("T123") is None
 
 
 def test_as_dict_is_json_serialisable():
@@ -101,6 +128,14 @@ def test_render_report_contains_all_sections(tmp_path):
     assert "### Sigma" in md  # LLM recommendations
     assert "local LLM (Ollama)" in md
     assert "T1083" in md and "File and Directory Discovery" in md
+    # The report shows the actual Sliver console command, not the bare Linux form.
+    assert "**Commande Sliver** : `ls -la`" in md
+
+
+def test_render_report_shows_sliver_console_syntax():
+    tech = techniques.get_technique("T1082")
+    md = reports.render_report(tech, target="s1", evidence="Linux", recommendations="x")
+    assert "**Commande Sliver** : `execute -o uname -a`" in md
 
 
 def test_render_report_falls_back_to_curated_detections():

@@ -19,6 +19,7 @@ through the human-in-the-loop Safety Gate, and only then runs it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .sliver import DISCOVERY_COMMANDS
@@ -29,7 +30,20 @@ __all__ = [
     "get_technique",
     "list_techniques",
     "resolve_technique_command",
+    "generic_technique",
+    "technique_or_generic",
+    "MITRE_ID_RE",
+    "DEFAULT_COMMAND_KEY",
 ]
+
+# Technique ids look like ``T1033`` (optionally ``TA0007`` for tactics, which we
+# do not emulate). Matching is anchored so free text can be scanned safely.
+MITRE_ID_RE = re.compile(r"\bT\d{4}\b")
+
+# Allow-list key used when an operator asks for a technique that is not in the
+# curated catalogue: we still run a defensible, read-only discovery command and
+# label the report with the requested id. Never a bare Linux command.
+DEFAULT_COMMAND_KEY = "uname"
 
 
 @dataclass(frozen=True)
@@ -167,6 +181,91 @@ def list_techniques() -> tuple[Technique, ...]:
 
 
 def resolve_technique_command(technique_id: str) -> str | None:
-    """Return the Sliver discovery command for *technique_id*, or ``None``."""
+    """Return the Sliver discovery command for *technique_id*, or ``None``.
+
+    Unknown ids return ``None`` — callers that want a dynamic fallback should use
+    :func:`generic_technique` instead.
+    """
     tech = get_technique(technique_id)
     return DISCOVERY_COMMANDS[tech.command] if tech else None
+
+
+def _normalise_id(technique_id: str) -> str:
+    """Return the canonical ``T####`` form of *technique_id*, or ``""``."""
+    key = str(technique_id).strip().upper()
+    if key.startswith("ATTACK."):
+        key = key.removeprefix("ATTACK.")
+    return key if re.fullmatch(r"T\d{4}", key) else ""
+
+
+def generic_technique(
+    technique_id: str,
+    *,
+    name: str = "",
+    tactic: str = "Discovery",
+    command_key: str = DEFAULT_COMMAND_KEY,
+) -> Technique:
+    """Build a Technique for an id not in the curated catalogue.
+
+    Used to keep the agent *open*: any MITRE ATT&CK id the operator names can be
+    emulated with a defensible read-only discovery command, and still produces a
+    Purple Team report. The returned technique is clearly labelled as generic so
+    the operator (and the report) knows it is not a curated mapping.
+
+    Args:
+        technique_id: The requested id (any case, optional ``attack.`` prefix).
+        name: Technique name if known (e.g. supplied by the LLM); else a label.
+        tactic: MITRE tactic name; defaults to Discovery.
+        command_key: A key from :data:`adversary_sim.sliver.DISCOVERY_COMMANDS`.
+
+    Raises:
+        ValueError: If *command_key* is not on the Sliver allow-list.
+    """
+    if command_key not in DISCOVERY_COMMANDS:
+        raise ValueError(f"'{command_key}' is not on the Sliver discovery allow-list.")
+    tid = _normalise_id(technique_id) or "T0000"
+    label = name.strip() or "Generic discovery emulation"
+    return Technique(
+        id=tid,
+        name=label,
+        tactic=tactic.strip() or "Discovery",
+        description=(
+            f"Émulation générique pour {tid} ({label}). Technique hors catalogue "
+            "curaté : une commande de découverte en lecture seule est utilisée et "
+            "le rapport est étiqueté comme générique."
+        ),
+        command=command_key,
+        detections=(
+            "auditd: surveiller les execve de commandes de découverte "
+            "(-a always,exit -F arch=b64 -S execve -k discovery).",
+            "Sigma: process_creation d'un binaire de découverte avec un parent "
+            "implant/beacon inattendu.",
+            "Baseline: alerter sur toute rafale de commandes d'énumération depuis "
+            "un même arbre de processus en dehors d'une fenêtre d'admin connue.",
+        ),
+    )
+
+
+def technique_or_generic(
+    technique_id: str,
+    *,
+    name: str = "",
+    tactic: str = "Discovery",
+    command_key: str | None = None,
+) -> Technique | None:
+    """Return the curated technique for *technique_id*, else a generic one.
+
+    This is the entry point that keeps the agent open to *any* MITRE ATT&CK id.
+    Returns ``None`` only when the id is not a valid ``T####`` value.
+    """
+    curated = get_technique(technique_id)
+    if curated is not None:
+        return curated
+    if not _normalise_id(technique_id):
+        return None
+    return generic_technique(
+        technique_id,
+        name=name,
+        tactic=tactic,
+        command_key=command_key or DEFAULT_COMMAND_KEY,
+    )

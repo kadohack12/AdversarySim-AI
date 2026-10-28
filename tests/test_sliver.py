@@ -351,18 +351,19 @@ def test_run_discovery_builds_use_and_command(fake_client, stub_run):
 def test_run_discovery_accepts_literal_command(fake_client, stub_run):
     capture = stub_run("Linux host 6.1.0 #1 SMP x86_64 GNU/Linux")
     result = sliver.sliver_run_discovery("sess1", "uname -a")
-    assert capture["commands"] == ["use sess1", "uname -a"]
-    assert "uname -a" in result
+    # The bare Linux form is translated to the Sliver console form.
+    assert capture["commands"] == ["use sess1", "execute -o uname -a"]
+    assert "execute -o uname -a" in result
 
 
 @pytest.mark.parametrize(
     "key,expected",
     [
         ("whoami", "whoami"),
-        ("id", "id"),
-        ("uname", "uname -a"),
-        ("hostname", "hostname"),
-        ("uptime", "uptime"),
+        ("id", "execute -o id"),
+        ("uname", "execute -o uname -a"),
+        ("hostname", "execute -o hostname"),
+        ("uptime", "execute -o uptime"),
     ],
 )
 def test_run_discovery_maps_short_keys(fake_client, stub_run, key, expected):
@@ -420,24 +421,24 @@ def test_discovery_commands_allowlist_is_exact():
     assert sliver.DISCOVERY_COMMANDS == {
         # T1082 — System Information Discovery
         "whoami": "whoami",
-        "id": "id",
-        "uname": "uname -a",
-        "hostname": "hostname",
-        "uptime": "uptime",
+        "id": "execute -o id",
+        "uname": "execute -o uname -a",
+        "hostname": "execute -o hostname",
+        "uptime": "execute -o uptime",
         # T1083 — File and Directory Discovery
-        "pwd": "pwd",
+        "pwd": "execute -o pwd",
         "ls": "ls -la",
-        "canary": "cat /tmp/canary_data.txt",
+        "canary": "execute -o cat /tmp/canary_data.txt",
         # T1057 — Process Discovery
-        "ps": "ps aux",
+        "ps": "ps",
         # T1016 — System Network Configuration Discovery
-        "ip": "ip a",
-        "route": "route -n",
+        "ip": "execute -o ip a",
+        "route": "execute -o route -n",
     }
 
 
 def test_run_discovery_file_and_directory_commands(fake_client, stub_run):
-    for key, expected in (("pwd", "pwd"), ("ls", "ls -la")):
+    for key, expected in (("pwd", "execute -o pwd"), ("ls", "ls -la")):
         capture = stub_run("ok")
         result = sliver.sliver_run_discovery("s1", key)
         assert capture["commands"] == ["use s1", expected]
@@ -447,14 +448,14 @@ def test_run_discovery_file_and_directory_commands(fake_client, stub_run):
 def test_run_discovery_canary_short_key(fake_client, stub_run):
     capture = stub_run("canary-content")
     result = sliver.sliver_run_discovery("s1", "canary")
-    assert capture["commands"] == ["use s1", "cat /tmp/canary_data.txt"]
+    assert capture["commands"] == ["use s1", "execute -o cat /tmp/canary_data.txt"]
     assert "canary-content" in result
 
 
 def test_run_discovery_canary_named_decoy(fake_client, stub_run):
     capture = stub_run("secret")
     result = sliver.sliver_run_discovery("s1", "cat /tmp/canary_finance_q3.txt")
-    assert capture["commands"] == ["use s1", "cat /tmp/canary_finance_q3.txt"]
+    assert capture["commands"] == ["use s1", "execute -o cat /tmp/canary_finance_q3.txt"]
     assert "secret" in result
 
 
@@ -484,7 +485,12 @@ def test_run_discovery_refuses_file_paths_outside_allowlist(fake_client, stub_ru
 def test_resolve_discovery_command_helper():
     assert sliver._resolve_discovery_command("ls") == "ls -la"
     assert sliver._resolve_discovery_command("ls -la") == "ls -la"
-    assert sliver._resolve_discovery_command("cat /tmp/canary_x.txt") == "cat /tmp/canary_x.txt"
+    assert sliver._resolve_discovery_command("uname -a") == "execute -o uname -a"
+    assert sliver._resolve_discovery_command("execute -o uname -a") == "execute -o uname -a"
+    assert sliver._resolve_discovery_command("ps aux") == "ps"
+    assert sliver._resolve_discovery_command("cat /tmp/canary_x.txt") == (
+        "execute -o cat /tmp/canary_x.txt"
+    )
     assert sliver._resolve_discovery_command("cat /etc/passwd") is None
     assert sliver._resolve_discovery_command("rm -rf /") is None
 
@@ -492,11 +498,13 @@ def test_resolve_discovery_command_helper():
 def test_run_discovery_process_command(fake_client, stub_run):
     capture = stub_run("PID USER COMMAND")
     result = sliver.sliver_run_discovery("s1", "ps")
-    assert capture["commands"] == ["use s1", "ps aux"]
-    assert "ps aux" in result
+    assert capture["commands"] == ["use s1", "ps"]
+    assert "ps" in result
 
 
-@pytest.mark.parametrize("key,expected", [("ip", "ip a"), ("route", "route -n")])
+@pytest.mark.parametrize(
+    "key,expected", [("ip", "execute -o ip a"), ("route", "execute -o route -n")]
+)
 def test_run_discovery_network_commands(fake_client, stub_run, key, expected):
     capture = stub_run("net")
     result = sliver.sliver_run_discovery("s1", key)

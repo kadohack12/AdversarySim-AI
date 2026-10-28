@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .core import OllamaClient
+from .sliver import DISCOVERY_COMMANDS
 from .techniques import Technique
 
 __all__ = [
@@ -107,6 +108,7 @@ def render_report(
 
     source = "local LLM (Ollama)" if llm_used else "curated technique catalogue"
     detections = "\n".join(f"- {item}" for item in technique.detections) or "- (none curated)"
+    sliver_command = DISCOVERY_COMMANDS.get(technique.command, technique.command)
 
     return (
         f"# Purple Team Report — {technique.id} {technique.name}\n\n"
@@ -122,7 +124,7 @@ def render_report(
         f"- **Nom** : {technique.name}\n"
         f"- **Tactique** : {technique.tactic}\n"
         f"- **Classification sécurité** : `{technique.risk}` (Safety Gate `[y/N]`)\n"
-        f"- **Commande Sliver** : `{technique.command}`\n\n"
+        f"- **Commande Sliver** : `{sliver_command}`\n\n"
         f"{technique.description}\n\n"
         "## Preuves d'exécution\n\n"
         "```text\n"

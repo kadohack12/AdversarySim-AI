@@ -63,6 +63,7 @@ def test_tool_schemas_expose_expected_functions():
         "sliver_list_beacons",
         "sliver_list_jobs",
         "sliver_run_discovery",
+        "mitre_run_technique",
     }
     for entry in TOOL_SCHEMAS:
         assert entry["type"] == "function"
@@ -556,3 +557,63 @@ async def test_discovery_tool_missing_arguments_is_refused(monkeypatch):
     await client.aclose()
 
     assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dynamic_mitre_request_writes_report_to_disk(monkeypatch, tmp_path):
+    """A natural-language dynamic request ("Simule MITRE T1033") writes a report.
+
+    T1033 is *not* in the curated catalogue: the agent must resolve it dynamically,
+    run the mapped read-only discovery command through the Safety Gate, and write
+    ``reports/T1033_<timestamp>.md`` to disk.
+    """
+    monkeypatch.setenv("ADVERSARYSIM_ASSUME_YES", "1")
+    monkeypatch.delenv("ADVERSARYSIM_DRY_RUN", raising=False)
+    monkeypatch.setenv("ADVERSARYSIM_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("ADVERSARYSIM_OPERATOR", "tester")
+
+    captured = {}
+
+    def _discovery(session_id, command):
+        captured["session_id"] = session_id
+        captured["command"] = command
+        return "Ran on session ab12cd34: execute -o uname -a\n\nTarget output:\nLinux target 6.1"
+
+    monkeypatch.setattr(sliver, "sliver_run_discovery", _discovery)
+    monkeypatch.setattr(sliver, "sliver_resolve_target", lambda: "ab12cd34")
+    monkeypatch.setattr(sliver, "is_target_id", lambda candidate: candidate == "ab12cd34")
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_call_response(
+                "mitre_run_technique",
+                {"technique_id": "T1033", "name": "System Owner/User Discovery"},
+            )
+        body = json.loads(request.content)
+        tool_msgs = [m for m in body["messages"] if m["role"] == "tool"]
+        assert tool_msgs and "Rapport Purple Team" in tool_msgs[-1]["content"]
+        return _text_response("J'ai lancé la simulation T1033 et écrit le rapport.")
+
+    client = _client(handler)
+    history: list[ChatMessage] = [ChatMessage("user", "Simule MITRE T1033")]
+    await cli._converse(client, history)
+    await client.aclose()
+
+    # The discovery command ran on the auto-resolved target.
+    assert captured["session_id"] == "ab12cd34"
+    assert captured["command"] in sliver.DISCOVERY_COMMANDS
+
+    # The report was written to disk with the dynamic technique id.
+    written = list(tmp_path.glob("T1033_*.md"))
+    assert len(written) == 1
+    body = written[0].read_text(encoding="utf-8")
+    assert "T1033" in body
+    assert "System Owner/User Discovery" in body
+    assert "tester" in body  # operator recorded from the environment
+    assert "Recommandations défensives" in body
+
+    # The report path is surfaced back to the model as the tool result.
+    assert any(m.role == "tool" and "T1033" in m.content for m in history)

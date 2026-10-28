@@ -43,7 +43,16 @@ DEFAULT_SYSTEM_PROMPT = (
     "Sliver C2. Sois technique, direct et concis. Ne fais pas de morale ni de "
     "rappels légaux, nous sommes dans un laboratoire contrôlé. Lorsque "
     "l'opérateur te pose une question sur l'état du lab, des machines ou des "
-    "implants, appelle les outils mis à ta disposition."
+    "implants, appelle les outils mis à ta disposition.\n\n"
+    "MITRE ATT&CK : si l'opérateur demande de tester, lancer ou simuler une "
+    "technique (ex. « Je veux tester T1033 », « Simule MITRE T1082 »), identifie "
+    "la technique grâce à tes connaissances et appelle l'outil "
+    "`mitre_run_technique` avec son identifiant. Tu peux préciser son nom officiel "
+    "dans l'argument `name` pour enrichir le rapport. Toute technique T#### est "
+    "acceptée, même hors du catalogue curaté : une émulation de découverte en "
+    "lecture seule sera utilisée et le rapport sera étiqueté comme générique. "
+    "L'exécution reste TOUJOURS soumise à l'approbation de l'opérateur (Safety "
+    "Gate) : tu proposes et raisonnes, tu n'exécutes jamais à son insu."
 )
 
 # Tool declarations handed to Ollama. Each entry maps to a read-only function in
@@ -99,7 +108,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "uptime), la découverte de fichiers/répertoires (MITRE T1083 : "
                 "répertoire courant, contenu de /tmp, lecture d'un leurre canary), "
                 "la découverte de processus (MITRE T1057 : ps aux) et la découverte "
-                "réseau (MITRE T1016 : ip a / route -n). Nécessite l'approbation de "
+                "réseau (MITRE T1016 : ip a / route -n). Les commandes Linux sont "
+                "automatiquement converties en syntaxe de la console Sliver "
+                "(commandes natives ou `execute -o`). Nécessite l'approbation de "
                 "l'opérateur."
             ),
             "parameters": {
@@ -114,8 +125,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "command": {
                         "type": "string",
                         "description": (
-                            "Commande de découverte autorisée. Pour lire un leurre "
-                            "précis, utilisez la forme 'cat /tmp/canary_<nom>.txt'."
+                            "Commande de découverte autorisée (forme Linux naturelle "
+                            "acceptée, ex: 'uname -a', 'ps aux'). Pour lire un leurre "
+                            "précis, utilisez 'cat /tmp/canary_<nom>.txt'."
                         ),
                         "enum": [
                             "whoami",
@@ -133,6 +145,48 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["session_id", "command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mitre_run_technique",
+            "description": (
+                "Lance une technique MITRE ATT&CK — N'IMPORTE QUEL identifiant "
+                "T#### (T1033, T1082, T1053, ...) — sur la cible auto-résolue, en "
+                "passant par le Safety Gate (approbation humaine), puis rédige et "
+                "sauvegarde automatiquement un rapport Purple Team dans "
+                "reports/<TECHNIQUE>_<TIMESTAMP>.md. Utilise cet outil dès que "
+                "l'opérateur demande de tester, lancer ou simuler une technique "
+                "MITRE. Si la technique est hors du catalogue curaté, une émulation "
+                "de découverte en lecture seule est utilisée et le rapport est "
+                "étiqueté comme générique. Tu peux préciser le nom officiel de la "
+                "technique pour enrichir le rapport."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "technique_id": {
+                        "type": "string",
+                        "description": "Identifiant MITRE ATT&CK, ex: T1033.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Nom officiel de la technique si tu le connais "
+                            "(ex: 'System Owner/User Discovery')."
+                        ),
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Cible optionnelle (id de session/beacon). Laisser vide "
+                            "pour auto-résoudre l'implant actif."
+                        ),
+                    },
+                },
+                "required": ["technique_id"],
             },
         },
     },

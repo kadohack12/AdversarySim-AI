@@ -97,11 +97,14 @@ TOOL_NAMES = frozenset(
         "sliver_list_beacons",
         "sliver_list_jobs",
         "sliver_run_discovery",
+        "mitre_run_technique",
     }
 )
 
 # Tools that accept arguments from the model (name -> ordered parameter names).
-# Tools absent from this map are invoked with no arguments.
+# Tools absent from this map are invoked with no arguments. ``mitre_run_technique``
+# is handled specially (its arguments are optional and it writes a report), so it
+# is intentionally not listed here.
 TOOL_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "sliver_run_discovery": ("session_id", "command"),
 }
@@ -281,13 +284,18 @@ _MITRE_ID_RE = re.compile(r"\b[Tt](\d{4})\b")
 def _detect_mitre_request(text: str) -> Technique | None:
     """Return the technique referenced in *text*, or None.
 
-    Triggers only when the operator mentions "mitre" and a known technique id
-    (e.g. "Lance le test MITRE T1082"), so ordinary chat is unaffected.
+    Keeps the agent *open*: any MITRE ATT&CK id (``T1033``, ``T1082``, ...) is
+    honoured, whether or not it is in the curated catalogue. Curated ids resolve
+    to their entry; anything else becomes a generic technique so the operator can
+    still run a defensible discovery emulation and get a report.
+
+    Triggers only when the operator mentions "mitre", so ordinary chat is
+    unaffected. The id is taken from an explicit ``T####`` token.
     """
     if "mitre" not in text.lower():
         return None
     for match in _MITRE_ID_RE.finditer(text):
-        technique = techniques.get_technique(f"T{match.group(1)}")
+        technique = techniques.technique_or_generic(f"T{match.group(1)}")
         if technique is not None:
             return technique
     return None
@@ -404,20 +412,33 @@ def mitre_list() -> None:
 
 @mitre_app.command("run")
 def mitre_run(
-    technique_id: str = typer.Argument(..., help="Technique id, e.g. T1082."),
+    technique_id: str = typer.Argument(..., help="Technique id, e.g. T1082 or T1033."),
     session: str = typer.Argument("", help="Optional target session/beacon id."),
     report: bool = typer.Option(
         True, "--report/--no-report", help="Write a Markdown audit report."
     ),
     model: str = typer.Option(DEFAULT_MODEL, "--model", help="Ollama model for the report."),
 ) -> None:
-    """Run one MITRE technique (Safety Gate) and write a Purple Team report."""
+    """Run any MITRE technique (Safety Gate) and write a Purple Team report.
+
+    Curated ids (T1082, T1083, T1057, T1016) map to their dedicated discovery
+    command. Any other valid id (e.g. T1033) is emulated with a defensible
+    read-only discovery command and labelled as a generic mapping.
+    """
     print_banner()
-    technique = techniques.get_technique(technique_id)
+    technique = techniques.technique_or_generic(technique_id)
     if technique is None:
-        console.print(f"[danger]Unknown technique '{technique_id}'.[/danger]")
+        console.print(
+            f"[danger]'{technique_id}' is not a valid MITRE technique id "
+            "(expected e.g. T1033).[/danger]"
+        )
         render_techniques_table()
         raise typer.Exit(code=2)
+    if techniques.get_technique(technique_id) is None:
+        console.print(
+            f"[warn]{technique.id} is not in the curated catalogue — "
+            f"running a generic read-only discovery emulation.[/warn]"
+        )
     asyncio.run(run_mitre_technique(technique, session, model=model, use_llm=report))
 
 
@@ -523,9 +544,12 @@ async def _shell() -> None:
             if raw.startswith("/"):
                 slash_parts = shlex.split(raw)
                 if len(slash_parts) >= 2 and slash_parts[0].lower() == "/mitre":
-                    technique = techniques.get_technique(slash_parts[1])
+                    technique = techniques.technique_or_generic(slash_parts[1])
                     if technique is None:
-                        console.print(f"[danger]Unknown technique '{slash_parts[1]}'.[/danger]")
+                        console.print(
+                            f"[danger]'{slash_parts[1]}' is not a valid MITRE "
+                            "technique id (expected e.g. T1033).[/danger]"
+                        )
                         render_techniques_table()
                         continue
                     try:
@@ -589,7 +613,7 @@ async def _converse(
             )
         )
         for call in calls:
-            result = _execute_tool_call(call)
+            result = await _execute_tool_call_async(call)
             history.append(
                 ChatMessage("tool", _tool_result_message(call, result), tool_name=call.name)
             )
@@ -626,7 +650,8 @@ def _execute_tool_call(call: ToolCall) -> str:
     """Approve and run a model-requested Sliver tool, returning its result.
 
     Unknown tools are refused without touching Sliver; known tools are screened
-    by the Safety Gate before the underlying function runs.
+    by the Safety Gate before the underlying function runs. The MITRE tool is
+    dispatched to the async handler by the caller (see :func:`_execute_tool_call_async`).
     """
     operation = _resolve_tool(call.name)
     if operation is None:
@@ -656,6 +681,42 @@ def _execute_tool_call(call: ToolCall) -> str:
         risk=RISK_BY_TOOL.get(call.name, RiskLevel.READ_ONLY),
         command=command,
     )
+
+
+async def _execute_tool_call_async(call: ToolCall) -> str:
+    """Async wrapper around :func:`_execute_tool_call`.
+
+    The MITRE tool needs to await the report generator, so it cannot go through
+    the synchronous path; every other tool is executed synchronously.
+    """
+    if call.name == "mitre_run_technique":
+        return await _execute_mitre_tool_call(call)
+    return _execute_tool_call(call)
+
+
+async def _execute_mitre_tool_call(call: ToolCall) -> str:
+    """Handle a model-requested MITRE technique run (any ``T####`` id).
+
+    Resolves the technique dynamically (curated or generic), routes the discovery
+    command through the Safety Gate, and writes the Purple Team report. The
+    underlying ``run_mitre_technique`` coroutine owns the approval + report flow.
+    """
+    technique_id = str(call.arguments.get("technique_id", "")).strip()
+    if not technique_id:
+        return "Error: tool 'mitre_run_technique' requires a 'technique_id'."
+    technique = techniques.technique_or_generic(
+        technique_id,
+        name=str(call.arguments.get("name", "")),
+    )
+    if technique is None:
+        return f"Error: '{technique_id}' is not a valid MITRE technique id."
+
+    console.print(f"[muted]→ model requested MITRE technique[/muted] [bold]{technique.id}[/bold]")
+    session = str(call.arguments.get("session_id", "")).strip()
+    try:
+        return await run_mitre_technique(technique, session)
+    except Exception as exc:  # noqa: BLE001
+        return f"Failed to run MITRE {technique.id}: {exc}"
 
 
 def _handle_slash(raw: str) -> bool:

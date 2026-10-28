@@ -186,10 +186,10 @@ def test_mitre_list_shows_catalogue():
     assert "state-changing" in result.stdout
 
 
-def test_mitre_run_rejects_unknown_technique():
-    result = runner.invoke(cli.app, ["mitre", "run", "T9999"])
+def test_mitre_run_rejects_invalid_technique():
+    result = runner.invoke(cli.app, ["mitre", "run", "not-an-id"])
     assert result.exit_code == 2
-    assert "Unknown technique" in result.stdout
+    assert "not a valid MITRE technique id" in result.stdout
 
 
 def test_detect_mitre_request_matches_known_technique():
@@ -203,8 +203,12 @@ def test_detect_mitre_request_ignores_plain_chat():
     assert cli._detect_mitre_request("liste T1082 s'il te plaît") is None
 
 
-def test_detect_mitre_request_ignores_unknown_id():
-    assert cli._detect_mitre_request("MITRE T9999") is None
+def test_detect_mitre_request_handles_any_id_dynamically():
+    # An id outside the curated catalogue resolves to a generic technique.
+    tech = cli._detect_mitre_request("Simule MITRE T1033")
+    assert tech is not None
+    assert tech.id == "T1033"
+    assert tech.command in sliver.DISCOVERY_COMMANDS
 
 
 def test_render_techniques_table_runs():

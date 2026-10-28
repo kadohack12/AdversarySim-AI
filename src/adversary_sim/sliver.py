@@ -126,45 +126,66 @@ _ALLOWED_OS = tuple(_ALLOWED_FORMATS)
 # Default output format when the caller does not specify one.
 _DEFAULT_FORMAT = {"windows": "exe", "linux": "elf", "darwin": "macho"}
 
-# Strict allow-list of read-only host discovery commands. Only these exact
-# commands may run on a target; anything else is refused before it reaches the
-# target. Grouped by MITRE ATT&CK technique:
+# Strict allow-list of read-only host discovery commands, grouped by MITRE
+# ATT&CK technique:
 #   T1082 — System Information Discovery (whoami, id, uname, hostname, uptime)
 #   T1083 — File and Directory Discovery (pwd, ls, and a fixed canary read)
 #   T1057 — Process Discovery (ps)
 #   T1016 — System Network Configuration Discovery (ip, route)
+#
+# The values are *Sliver console* commands, not bare Linux commands: Sliver's
+# console has its own interpreter, so typing `uname -a` at the console prompt
+# fails with "unknown command". Commands therefore use either
+#   * Sliver's native equivalents (``whoami``, ``ls -la``, ``ps``), or
+#   * ``execute -o <cmd>`` for real system binaries. ``-o`` is required to
+#     capture the command's stdout — without it the output is not returned.
 DISCOVERY_COMMANDS: dict[str, str] = {
     # T1082 — System Information Discovery
     "whoami": "whoami",
-    "id": "id",
-    "uname": "uname -a",
-    "hostname": "hostname",
-    "uptime": "uptime",
+    "id": "execute -o id",
+    "uname": "execute -o uname -a",
+    "hostname": "execute -o hostname",
+    "uptime": "execute -o uptime",
     # T1083 — File and Directory Discovery. Paths are fixed literals, never
     # operator- or model-supplied, so discovery cannot be aimed at arbitrary
     # files on the target.
-    "pwd": "pwd",
+    "pwd": "execute -o pwd",
     "ls": "ls -la",
-    "canary": "cat /tmp/canary_data.txt",
+    "canary": "execute -o cat /tmp/canary_data.txt",
     # T1057 — Process Discovery. Fixed flags, no target selector: it can only
     # enumerate processes, never signal or kill one.
-    "ps": "ps aux",
+    "ps": "ps",
     # T1016 — System Network Configuration Discovery. Read-only, no arguments.
-    "ip": "ip a",
-    "route": "route -n",
+    "ip": "execute -o ip a",
+    "route": "execute -o route -n",
 }
 
-# Accept both the short keys above and the literal command strings operators or
-# models may pass (e.g. "uname -a").
+# Accept the short keys above, their Sliver console forms (e.g.
+# "execute -o uname -a") and the bare Linux form operators/models naturally type
+# (e.g. "uname -a"). Bare forms are mapped onto the allow-list value so the
+# Sliver syntax fix is transparent to callers.
+_BARE_DISCOVERY_ALIASES: dict[str, str] = {
+    "uname -a": "uname",
+    "hostname": "hostname",
+    "uptime": "uptime",
+    "pwd": "pwd",
+    "cat /tmp/canary_data.txt": "canary",
+    "ip a": "ip",
+    "route -n": "route",
+    "ps aux": "ps",
+}
+
 _DISCOVERY_ALIASES: dict[str, str] = {
     **{key: key for key in DISCOVERY_COMMANDS},
     **{value: key for key, value in DISCOVERY_COMMANDS.items()},
+    **{value.lower(): key for key, value in DISCOVERY_COMMANDS.items()},
+    **_BARE_DISCOVERY_ALIASES,
 }
 
 # A canary read is the one discovery command that varies: operators may seed
 # decoy files under /tmp/ (T1083). The directory is fixed and the file name must
 # match a strict pattern, so this can never be aimed at an arbitrary path.
-_CANARY_READ_RE = re.compile(r"^cat\s+/tmp/(canary_[A-Za-z0-9_]{1,64}\.txt)$")
+_CANARY_READ_RE = re.compile(r"^(?:execute\s+-o\s+)?cat\s+/tmp/(canary_[A-Za-z0-9_]{1,64}\.txt)$")
 
 # Timeout for a single discovery command executed on a session.
 _DISCOVERY_TIMEOUT = 60
@@ -562,19 +583,24 @@ def sliver_generate_payload(
 def _resolve_discovery_command(command: str) -> str | None:
     """Resolve an operator/model-supplied discovery command to a safe literal.
 
-    Returns the exact command string to run on the target, or ``None`` when the
-    request is not on the allow-list. Accepts the short keys in
-    :data:`DISCOVERY_COMMANDS`, their literal forms, and a canary read of any
-    ``/tmp/canary_*.txt`` file (MITRE T1083).
+    Returns the exact **Sliver console** command to run on the target, or
+    ``None`` when the request is not on the allow-list. Accepts the short keys in
+    :data:`DISCOVERY_COMMANDS`, their Sliver console forms (``execute -o uname
+    -a``), the bare Linux form operators/models type (``uname -a``), and a canary
+    read of any ``/tmp/canary_*.txt`` file (MITRE T1083).
     """
     requested = str(command).strip()
-    key = _DISCOVERY_ALIASES.get(requested) or _DISCOVERY_ALIASES.get(requested.lower())
+    key = (
+        _DISCOVERY_ALIASES.get(requested)
+        or _DISCOVERY_ALIASES.get(requested.lower())
+        or _DISCOVERY_ALIASES.get(" ".join(requested.lower().split()))
+    )
     if key is not None:
         return DISCOVERY_COMMANDS[key]
 
     canary = _CANARY_READ_RE.match(requested)
     if canary:
-        return f"cat /tmp/{canary.group(1)}"
+        return f"execute -o cat /tmp/{canary.group(1)}"
     return None
 
 
