@@ -236,32 +236,49 @@ delivered, executed, and observed entirely on your own machine.
 > The model reasons about the observed behaviour and proposes detections — but it
 > never touches the target itself.
 
-### Optional — defensible system discovery (MITRE T1082)
+### Optional — defensible discovery (MITRE T1082 + T1083)
 
-With a session established, you can emulate a small piece of **System Information
-Discovery** on the target. It is a *narrow, allow-listed* action, not a remote
-shell:
+With a session established, you can emulate a small slice of adversary discovery
+on the target. It is a *narrow, allow-listed* action, not a remote shell:
 
 ```bash
 adversarysim discover <SESSION_ID> whoami
 adversarysim discover <SESSION_ID> "uname -a"
+adversarysim discover <SESSION_ID> ls          # T1083 — directory listing
+adversarysim discover <SESSION_ID> "cat /tmp/canary_data.txt"   # T1083 — canary read
 ```
 
-Only `whoami`, `id`, `uname -a`, `hostname` and `uptime` are accepted. The action
-is `state-changing`, so AdversarySim prompts for `[y/N]` — press Enter and nothing
-runs:
+Seed a decoy on the target first if you want something to find:
+
+```bash
+# inside the container shell
+echo 'FLAG{canary}' > /tmp/canary_data.txt
+```
+
+Only these commands are accepted:
+
+| Technique | Commands |
+| --------- | -------- |
+| **T1082** System Information Discovery | `whoami`, `id`, `uname -a`, `hostname`, `uptime` |
+| **T1083** File and Directory Discovery | `pwd`, `ls -la`, `cat /tmp/canary_*.txt` |
+
+Paths are fixed literals — a canary read is confined to `/tmp/canary_*.txt` — so
+discovery can never be aimed at an arbitrary file (no `cat /etc/shadow`, no
+`ls /root`). The action is `state-changing`, so AdversarySim prompts for `[y/N]` —
+press Enter and nothing runs:
 
 ```text
-  Run discovery command 'whoami' on session <SESSION_ID>
-  command: sliver_run_discovery session=<SESSION_ID> command=whoami
+  ▚ SAFETY GATE · STATE-CHANGING
+  Run discovery command 'cat /tmp/canary_data.txt' on session <SESSION_ID>
+  command: sliver_run_discovery session=<SESSION_ID> command=cat /tmp/canary_data.txt
   risk: state-changing
 Proceed? [y/N]
 ```
 
-**Expected result:** after approving, the target's output is shown (`root`,
-kernel string, etc.). The same tool is available to the local model inside
-`adversarysim shell` — ask "Qui est l'utilisateur sur la session ?" and the model
-requests `sliver_run_discovery`, still gated by the same `[y/N]` prompt.
+**Expected result:** after approving, the target's output is shown (`root`, kernel
+string, directory listing, canary contents). The same tool is available to the
+local model inside `adversarysim shell` — ask "Quels fichiers sont dans /tmp ?" and
+the model requests `sliver_run_discovery`, still gated by the same `[y/N]` prompt.
 
 ---
 
@@ -309,7 +326,9 @@ rm -f implants/sliver_implant_linux_8888.elf
 
 - ✅ All callbacks stay on `127.0.0.1` — **zero telemetry**.
 - ✅ Every implant generation is **operator-approved**.
-- ✅ Discovery commands are **allow-listed, read-only, and operator-approved** (`[y/N]`).
+- ✅ Discovery commands are **allow-listed, read-only, and operator-approved** (`[y/N]`):
+  T1082 system info and T1083 file/directory discovery, with canary reads confined
+  to `/tmp/canary_*.txt`.
 - ✅ The target is a **disposable `--rm` container**.
 - ✅ Cleanup is a single `exit`.
 - ❌ AdversarySim never exposes a general-purpose remote shell — discovery is a

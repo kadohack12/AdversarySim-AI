@@ -152,3 +152,24 @@ def test_render_table_handles_empty_rows():
 def test_print_banner_runs():
     # Should not raise.
     cli.print_banner()
+
+
+def test_brand_identity_is_kadohack12():
+    assert cli.BRAND == "kadohack12"
+    assert "kadohack12" in cli.CREDIT
+    # The banner, credit and safety-gate marker are wired into the dark theme.
+    assert cli.DARK_THEME is not None
+    result = runner.invoke(cli.app, ["version"])
+    assert "kadohack12" in result.stdout
+
+
+def test_dark_theme_defines_expected_styles():
+    for token in ("brand", "accent", "muted", "ok", "warn", "danger"):
+        assert token in cli.DARK_THEME.styles
+
+
+def test_risk_styles_cover_all_levels():
+    from adversary_sim.safety import RiskLevel
+
+    for level in RiskLevel:
+        assert level in cli.RISK_STYLE

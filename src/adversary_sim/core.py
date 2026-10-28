@@ -94,10 +94,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "sliver_run_discovery",
             "description": (
-                "Exécute une commande de découverte système en LECTURE SEULE sur "
-                "une session Sliver (MITRE T1082 - System Information Discovery). "
-                "Utile pour savoir quel utilisateur, quel OS ou quel uptime tourne "
-                "sur la machine cible. Nécessite l'approbation de l'opérateur."
+                "Exécute une commande de découverte en LECTURE SEULE sur une session "
+                "Sliver. Couvre la découverte système (MITRE T1082 : utilisateur, OS, "
+                "uptime) et la découverte de fichiers/répertoires (MITRE T1083 : "
+                "répertoire courant, contenu de /tmp, lecture d'un fichier leurre "
+                "canary). Nécessite l'approbation de l'opérateur."
             ),
             "parameters": {
                 "type": "object",
@@ -110,8 +111,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                     "command": {
                         "type": "string",
-                        "description": "Commande de découverte autorisée.",
-                        "enum": ["whoami", "id", "uname -a", "hostname", "uptime"],
+                        "description": (
+                            "Commande de découverte autorisée. Pour lire un leurre "
+                            "précis, utilisez la forme 'cat /tmp/canary_<nom>.txt'."
+                        ),
+                        "enum": [
+                            "whoami",
+                            "id",
+                            "uname -a",
+                            "hostname",
+                            "uptime",
+                            "pwd",
+                            "ls -la",
+                            "cat /tmp/canary_data.txt",
+                        ],
                     },
                 },
                 "required": ["session_id", "command"],

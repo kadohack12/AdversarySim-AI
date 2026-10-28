@@ -342,6 +342,85 @@ def test_tool_result_message_format():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_file_discovery_question_runs_ls_through_safety_gate(monkeypatch):
+    """MITRE T1083: asking what files exist must run an allow-listed discovery
+    command (ls) via the Safety Gate and return the model's analysed answer.
+    """
+    monkeypatch.setenv("ADVERSARYSIM_ASSUME_YES", "1")
+    monkeypatch.delenv("ADVERSARYSIM_DRY_RUN", raising=False)
+
+    captured = {}
+
+    def _discovery(session_id, command):
+        captured["session_id"] = session_id
+        captured["command"] = command
+        return (
+            "Ran on session ab12cd34: ls -la\n\nTarget output:\n"
+            "total 8\n-rw-r--r-- 1 root root 42 canary_data.txt"
+        )
+
+    monkeypatch.setattr(sliver, "sliver_run_discovery", _discovery)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_call_response(
+                "sliver_run_discovery",
+                {"session_id": "ab12cd34", "command": "ls -la"},
+            )
+        tool_msgs = [m for m in body["messages"] if m["role"] == "tool"]
+        assert tool_msgs and "canary_data.txt" in tool_msgs[-1]["content"]
+        return _text_response("Le répertoire contient un fichier canary_data.txt.")
+
+    client = _client(handler)
+    history: list[ChatMessage] = [
+        ChatMessage("user", "Quels fichiers sont présents sur la machine ?")
+    ]
+    await cli._converse(client, history)
+    await client.aclose()
+
+    assert captured == {"session_id": "ab12cd34", "command": "ls -la"}
+    assert "canary_data.txt" in history[-1].content
+
+
+@pytest.mark.asyncio
+async def test_canary_read_question_through_safety_gate(monkeypatch):
+    """MITRE T1083: reading a decoy file is allow-listed to /tmp/canary_*.txt."""
+    monkeypatch.setenv("ADVERSARYSIM_ASSUME_YES", "1")
+    monkeypatch.delenv("ADVERSARYSIM_DRY_RUN", raising=False)
+
+    captured = {}
+
+    def _discovery(session_id, command):
+        captured["command"] = command
+        return "Ran on session s1: cat /tmp/canary_data.txt\n\nTarget output:\nFLAG{decoy}"
+
+    monkeypatch.setattr(sliver, "sliver_run_discovery", _discovery)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_call_response(
+                "sliver_run_discovery",
+                {"session_id": "s1", "command": "cat /tmp/canary_data.txt"},
+            )
+        return _text_response("Le leurre contient FLAG{decoy}.")
+
+    client = _client(handler)
+    history: list[ChatMessage] = [ChatMessage("user", "Lis le fichier leurre dans /tmp.")]
+    await cli._converse(client, history)
+    await client.aclose()
+
+    assert captured["command"] == "cat /tmp/canary_data.txt"
+    assert "FLAG{decoy}" in history[-1].content
+
+
 def test_discovery_tool_is_exposed_and_state_changing():
     from adversary_sim.core import TOOL_SCHEMAS
 
@@ -357,6 +436,9 @@ def test_discovery_tool_is_exposed_and_state_changing():
         "uname -a",
         "hostname",
         "uptime",
+        "pwd",
+        "ls -la",
+        "cat /tmp/canary_data.txt",
     ]
 
 

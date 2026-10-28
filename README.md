@@ -1,9 +1,10 @@
 # AdversarySim-AI
 
 ![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
-![Tests](https://img.shields.io/badge/tests-130%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-152%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Zero Telemetry](https://img.shields.io/badge/telemetry-zero-blueviolet)
+![by kadohack12](https://img.shields.io/badge/by-kadohack12-red)
 
 > A lightweight, safety-first AI assistant for **purple teaming** and **adversary emulation** with
 > [Sliver C2](https://github.com/BishopFox/sliver) and **local LLMs** via [Ollama](https://ollama.com).
@@ -80,7 +81,7 @@ work is powerful, so it needs guardrails. AdversarySim-AI is built around three 
 | Risk level      | Examples                        | Default on Enter |
 | --------------- | ------------------------------- | ---------------- |
 | `read-only`     | list sessions, beacons, jobs    | **allow** `[Y/n]` |
-| `state-changing`| run a discovery command, modify state | **deny** `[y/N]`  |
+| `state-changing`| run a discovery command (T1082/T1083), modify state | **deny** `[y/N]`  |
 | `destructive`   | generate / deploy an implant    | **deny** `[y/N]`  |
 
 Two environment switches make automation and audits easier:
@@ -105,13 +106,15 @@ on an already-established session. It does not provide a general-purpose remote 
   (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`) plus the
   allow-listed discovery tool (`sliver_run_discovery`) directly from the interactive shell, with
   every call routed through the Safety Gate.
-- **Defensible discovery (MITRE T1082)** — `sliver_run_discovery` emulates System Information
-  Discovery using a strict read-only allow-list (`whoami`, `id`, `uname -a`, `hostname`, `uptime`).
-  Anything else is refused before it reaches the target, and the action is `state-changing`
-  (`[y/N]`).
+- **Defensible discovery (MITRE T1082 + T1083)** — `sliver_run_discovery` emulates System
+  Information Discovery (`whoami`, `id`, `uname -a`, `hostname`, `uptime`) and File and Directory
+  Discovery (`pwd`, `ls -la`, and a canary read confined to `/tmp/canary_*.txt`). Paths are fixed
+  literals, never operator- or model-supplied. Anything else is refused before it reaches the
+  target, and the action is `state-changing` (`[y/N]`).
 - **Human-in-the-loop safety layer** — a single approval gate that every action goes through.
-- **Modern terminal UI** — a `rich` banner, colourised tables for sessions and jobs, and an
-  interactive shell with slash commands.
+- **Hyper-dark terminal UI** — a neon-on-black `rich` theme (`by kadohack12`), colourised tables
+  for sessions and jobs, a risk-coloured Safety Gate header, and an interactive shell with slash
+  commands.
 - **Graceful degradation** — if `sliver-client` is missing or the server is down, you get a clear,
   actionable message instead of a traceback.
 - **Small dependency surface** — `httpx`, `pydantic`, `rich`, `typer`.
@@ -213,11 +216,12 @@ cannot invoke anything outside the tools declared to it.
 
 The discovery tool is the clearest example: `sliver_run_discovery` is exposed to
 the model, but it is `state-changing` (deny-by-default `[y/N]`) and accepts only a
-strict read-only allow-list (`whoami`, `id`, `uname -a`, `hostname`, `uptime`).
-Any other command is refused before it reaches the target, so even a
-prompt-injected or hallucinated command cannot turn the agent into a
-general-purpose remote runner. `sliver_generate_payload` is deliberately **not**
-exposed as a tool at all.
+strict allow-list — System Information Discovery (`whoami`, `id`, `uname -a`,
+`hostname`, `uptime`) and File and Directory Discovery (`pwd`, `ls -la`, and a
+canary read confined to `/tmp/canary_*.txt`). Paths are fixed literals, so any
+other command is refused before it reaches the target: even a prompt-injected or
+hallucinated command cannot turn the agent into a general-purpose remote runner.
+`sliver_generate_payload` is deliberately **not** exposed as a tool at all.
 
 The LLM can describe *how* to generate an implant; only the operator's `y` at the
 confirmation prompt lets AdversarySim actually build one. There is no path from
@@ -293,15 +297,24 @@ adversarysim beacons
 adversarysim jobs
 ```
 
-### Run a discovery command on a session (MITRE T1082, approval required)
+### Run a discovery command on a session (MITRE T1082 + T1083, approval required)
 
 ```bash
 adversarysim discover ab12cd34 whoami
 adversarysim discover ab12cd34 "uname -a"
+adversarysim discover ab12cd34 ls
+adversarysim discover ab12cd34 "cat /tmp/canary_data.txt"
 ```
 
-Only the allow-listed read-only commands are accepted (`whoami`, `id`, `uname -a`,
-`hostname`, `uptime`); the action is `state-changing` and prompts for `[y/N]`.
+Only the allow-listed read-only commands are accepted:
+
+| Technique | Commands |
+| --------- | -------- |
+| **T1082** System Information Discovery | `whoami`, `id`, `uname -a`, `hostname`, `uptime` |
+| **T1083** File and Directory Discovery | `pwd`, `ls -la`, `cat /tmp/canary_*.txt` |
+
+Paths are fixed literals — a canary read is confined to `/tmp/canary_*.txt` — so discovery can
+never be aimed at an arbitrary file. The action is `state-changing` and prompts for `[y/N]`.
 
 ### Generate an implant (operator approval required)
 

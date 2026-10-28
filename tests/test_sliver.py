@@ -418,9 +418,67 @@ def test_run_discovery_runner_exception(fake_client, monkeypatch):
 
 def test_discovery_commands_allowlist_is_exact():
     assert sliver.DISCOVERY_COMMANDS == {
+        # T1082 — System Information Discovery
         "whoami": "whoami",
         "id": "id",
         "uname": "uname -a",
         "hostname": "hostname",
         "uptime": "uptime",
+        # T1083 — File and Directory Discovery
+        "pwd": "pwd",
+        "ls": "ls -la",
+        "canary": "cat /tmp/canary_data.txt",
     }
+
+
+def test_run_discovery_file_and_directory_commands(fake_client, stub_run):
+    for key, expected in (("pwd", "pwd"), ("ls", "ls -la")):
+        capture = stub_run("ok")
+        result = sliver.sliver_run_discovery("s1", key)
+        assert capture["commands"] == ["use s1", expected]
+        assert expected in result
+
+
+def test_run_discovery_canary_short_key(fake_client, stub_run):
+    capture = stub_run("canary-content")
+    result = sliver.sliver_run_discovery("s1", "canary")
+    assert capture["commands"] == ["use s1", "cat /tmp/canary_data.txt"]
+    assert "canary-content" in result
+
+
+def test_run_discovery_canary_named_decoy(fake_client, stub_run):
+    capture = stub_run("secret")
+    result = sliver.sliver_run_discovery("s1", "cat /tmp/canary_finance_q3.txt")
+    assert capture["commands"] == ["use s1", "cat /tmp/canary_finance_q3.txt"]
+    assert "secret" in result
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "cat /etc/shadow",
+        "cat /tmp/../etc/shadow",
+        "cat /tmp/secret.txt",
+        "cat /tmp/canary_data.txt; rm -rf /",
+        "cat /tmp/canary_data.txt && id",
+        "cat /tmp/canary_data.txt | sh",
+        "cat /tmp/canary_.txt",
+        "cat /tmp/canary_$(id).txt",
+        "ls /etc",
+        "ls -la /root",
+        "cd /tmp && ls",
+    ],
+)
+def test_run_discovery_refuses_file_paths_outside_allowlist(fake_client, stub_run, bad):
+    capture = stub_run("should not run")
+    result = sliver.sliver_run_discovery("s1", bad)
+    assert "Refused" in result
+    assert capture == {}  # the runner was never invoked
+
+
+def test_resolve_discovery_command_helper():
+    assert sliver._resolve_discovery_command("ls") == "ls -la"
+    assert sliver._resolve_discovery_command("ls -la") == "ls -la"
+    assert sliver._resolve_discovery_command("cat /tmp/canary_x.txt") == "cat /tmp/canary_x.txt"
+    assert sliver._resolve_discovery_command("cat /etc/passwd") is None
+    assert sliver._resolve_discovery_command("rm -rf /") is None

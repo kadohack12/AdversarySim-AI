@@ -18,6 +18,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
+from rich.theme import Theme
 
 from . import sliver
 from .core import (
@@ -34,7 +35,31 @@ from .safety import Action, RiskLevel, SafetyError, confirm, screen_text
 
 __all__ = ["app", "main"]
 
-console = Console()
+# ---------------------------------------------------------------------------
+# Hyper-dark visual identity — by Kadohack12
+# ---------------------------------------------------------------------------
+
+# Neon-on-black palette: blood-red for the brand, amber for warnings, cyan for
+# structure. Kept deliberately tight so the whole UI reads as one dark theme.
+BRAND = "kadohack12"
+RED = "#ff2d55"
+AMBER = "#ffb000"
+CYAN = "#00e5ff"
+GREEN = "#39ff14"
+
+DARK_THEME = Theme(
+    {
+        "brand": f"bold {RED}",
+        "brand.dim": f"dim {RED}",
+        "accent": f"bold {CYAN}",
+        "muted": "dim grey62",
+        "ok": "bold green",
+        "warn": f"bold {AMBER}",
+        "danger": f"bold {RED}",
+    }
+)
+
+console = Console(theme=DARK_THEME)
 
 BANNER = r"""
    _       _                          _              ____  _
@@ -46,6 +71,7 @@ BANNER = r"""
 """
 
 TAGLINE = "Purple-team assistant · Sliver C2 + local LLMs · human-in-the-loop"
+CREDIT = f"by {BRAND}"
 
 SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
@@ -94,20 +120,32 @@ app = typer.Typer(
 
 
 def print_banner() -> None:
-    """Render the startup banner."""
-    console.print(Text(BANNER, style="bold cyan"), highlight=False)
-    console.print(Panel(TAGLINE, style="dim"))
+    """Render the startup banner with the Kadohack12 dark identity."""
+    console.print(Text(BANNER, style=BRAND), highlight=False)
+    subtitle = Text()
+    subtitle.append("  AdversarySim-AI", style="accent")
+    subtitle.append("  ·  ", style="muted")
+    subtitle.append(CREDIT, style="brand.dim")
+    console.print(Panel(subtitle, border_style=RED, style="on black", padding=(0, 1)))
+    console.print(Text(f"  {TAGLINE}", style="muted"))
+    console.print()
 
 
 def render_table(rows: list[dict[str, str]], title: str) -> None:
-    """Render parsed Sliver rows as a rich table."""
+    """Render parsed Sliver rows as a hyper-dark rich table."""
     if not rows:
-        console.print(f"[yellow]{title}: none[/yellow]")
+        console.print(f"[warn]{title}: none[/warn]")
         return
-    table = Table(title=title, header_style="bold magenta")
+    table = Table(
+        title=Text(title, style="accent"),
+        header_style=f"bold {RED}",
+        border_style="grey35",
+        title_justify="left",
+        row_styles=["none", "on #0a0a0a"],
+    )
     columns = list(rows[0].keys())
     for column in columns:
-        table.add_column(column)
+        table.add_column(column, style="grey85")
     for row in rows:
         table.add_row(*[row.get(column, "") for column in columns])
     console.print(table)
@@ -131,6 +169,14 @@ def _parse_json_rows(output: str) -> list[dict[str, str]] | None:
     return None
 
 
+# Visual accent per risk level, used to frame the Safety Gate prompt.
+RISK_STYLE = {
+    RiskLevel.READ_ONLY: ("ok", "READ-ONLY"),
+    RiskLevel.STATE_CHANGING: ("warn", "STATE-CHANGING"),
+    RiskLevel.DESTRUCTIVE: ("danger", "DESTRUCTIVE"),
+}
+
+
 def run_action(
     summary: str,
     operation,
@@ -145,6 +191,14 @@ def run_action(
     Returns the operation's output, or a cancellation notice when refused.
     """
     action = Action(summary=summary, command=command, risk=risk)
+    style, label = RISK_STYLE.get(risk, ("warn", risk.value.upper()))
+    console.print(
+        Text.assemble(
+            ("  ▚ SAFETY GATE ", "brand"),
+            ("· ", "muted"),
+            (label, style),
+        )
+    )
     if not confirm(action, assume_yes=assume_yes, dry_run=dry_run):
         return f"Cancelled: {summary}"
     return operation()
@@ -164,7 +218,7 @@ def status() -> None:
         sliver.sliver_status,
         risk=RISK_BY_TOOL["sliver_status"],
     )
-    console.print(Panel(result, title="Sliver status", border_style="cyan"))
+    console.print(Panel(result, title=Text("Sliver status", style="accent"), border_style=CYAN))
 
 
 @app.command()
@@ -205,7 +259,7 @@ def discover(
         risk=RISK_BY_TOOL["sliver_run_discovery"],
         command=f"sliver_run_discovery session={session} command={command}",
     )
-    console.print(Panel(result, title="System discovery", border_style="green"))
+    console.print(Panel(result, title=Text("System discovery", style="accent"), border_style=GREEN))
 
 
 def _list_command(kind: str, title: str) -> None:
@@ -219,7 +273,7 @@ def _list_command(kind: str, title: str) -> None:
     if rows is not None:
         render_table(rows, title)
     else:
-        console.print(Panel(result, title=title, border_style="green"))
+        console.print(Panel(result, title=Text(title, style="accent"), border_style=GREEN))
 
 
 @app.command()
@@ -234,7 +288,7 @@ def generate(
     command = f"generate --os {os} --mtls {lhost}:{lport} --format {format or 'default'}"
     reasons = screen_text(lhost, forbidden=("..", "/"))
     if reasons:
-        console.print("[red]Refused: suspicious input.[/red]")
+        console.print("[danger]Refused: suspicious input.[/danger]")
         for reason in reasons:
             console.print(f"  - {reason}")
         raise typer.Exit(code=2)
@@ -247,7 +301,9 @@ def generate(
         risk=RISK_BY_TOOL["sliver_generate_payload"],
         command=command,
     )
-    console.print(Panel(result, title="Implant generation", border_style="green"))
+    console.print(
+        Panel(result, title=Text("Implant generation", style="accent"), border_style=GREEN)
+    )
 
 
 @app.command()
@@ -265,8 +321,8 @@ async def _ask(prompt: str, model: str) -> None:
         with console.status(f"Thinking with {model}…"):
             reply = await client.chat(prompt)
     except OllamaError as exc:
-        console.print(f"[red]{exc}[/red]")
-        console.print("[dim]Is Ollama running? Try `ollama serve`.[/dim]")
+        console.print(f"[danger]{exc}[/danger]")
+        console.print("[muted]Is Ollama running? Try `ollama serve`.[/muted]")
         raise typer.Exit(code=1) from exc
     finally:
         await client.aclose()
@@ -284,19 +340,19 @@ async def _shell() -> None:
     client = OllamaClient(system_prompt=SYSTEM_PROMPT)
     available = await client.is_available()
     if available:
-        console.print(f"[green]Ollama ready[/green] · model [bold]{client.model}[/bold]")
+        console.print(f"[ok]Ollama ready[/ok] · model [bold]{client.model}[/bold]")
     else:
         console.print(
-            f"[yellow]Ollama not reachable at {client.host}[/yellow] — "
+            f"[warn]Ollama not reachable at {client.host}[/warn] — "
             "chat disabled, Sliver shortcuts still work."
         )
-    console.print("[dim]Commands: /status /sessions /beacons /jobs /help /quit[/dim]\n")
+    console.print("[muted]Commands: /status /sessions /beacons /jobs /help /quit[/muted]\n")
 
     history: list[ChatMessage] = []
     try:
         while True:
             try:
-                raw = Prompt.ask("[bold cyan]adversarysim[/bold cyan]").strip()
+                raw = Prompt.ask(f"[{RED}]▚[/] [accent]adversarysim[/accent]").strip()
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
@@ -307,14 +363,14 @@ async def _shell() -> None:
                     break
                 continue
             if not available:
-                console.print("[yellow]LLM unavailable; use /commands or start Ollama.[/yellow]")
+                console.print("[warn]LLM unavailable; use /commands or start Ollama.[/warn]")
                 continue
             history.append(ChatMessage("user", raw))
             mark = len(history) - 1
             try:
                 await _converse(client, history)
             except OllamaError as exc:
-                console.print(f"[red]{exc}[/red]")
+                console.print(f"[danger]{exc}[/danger]")
                 del history[mark:]
     finally:
         await client.aclose()
@@ -393,10 +449,10 @@ def _execute_tool_call(call: ToolCall) -> str:
     """
     operation = _resolve_tool(call.name)
     if operation is None:
-        console.print(f"[red]Refused: unknown tool '{call.name}'.[/red]")
+        console.print(f"[danger]Refused: unknown tool '{call.name}'.[/danger]")
         return f"Error: tool '{call.name}' is not available."
 
-    console.print(f"[dim]→ model requested tool[/dim] [bold]{call.name}[/bold]")
+    console.print(f"[muted]→ model requested tool[/muted] [bold]{call.name}[/bold]")
     summary = f"Run Sliver tool '{call.name}' requested by the local model"
     command = call.name
 
@@ -429,13 +485,15 @@ def _handle_slash(raw: str) -> bool:
         return True
     if name == "/help":
         console.print(
-            "[bold]Available commands[/bold]\n"
-            "  /status     check Sliver client + server\n"
-            "  /sessions   list active sessions\n"
-            "  /beacons    list beacons\n"
-            "  /jobs       list listeners\n"
-            "  /help       show this help\n"
-            "  /quit       exit"
+            f"[accent]Available commands[/accent]\n"
+            f"  [{CYAN}]/status[/]     check Sliver client + server\n"
+            f"  [{CYAN}]/sessions[/]   list active sessions\n"
+            f"  [{CYAN}]/beacons[/]    list beacons\n"
+            f"  [{CYAN}]/jobs[/]       list listeners\n"
+            f"  [{CYAN}]/help[/]       show this help\n"
+            f"  [{CYAN}]/quit[/]       exit\n"
+            f"[muted]  or just ask in natural language — discovery tools are "
+            f"Safety-Gated.[/muted]"
         )
         return False
     mapping = {
@@ -456,9 +514,9 @@ def _handle_slash(raw: str) -> bool:
         if rows is not None:
             render_table(rows, title)
         else:
-            console.print(Panel(result, title=title, border_style="green"))
+            console.print(Panel(result, title=Text(title, style="accent"), border_style=GREEN))
         return False
-    console.print(f"[red]Unknown command: {name}[/red] (try /help)")
+    console.print(f"[danger]Unknown command: {name}[/danger] (try /help)")
     return False
 
 
@@ -467,7 +525,14 @@ def version() -> None:
     """Print the AdversarySim-AI version."""
     from . import __version__
 
-    console.print(f"AdversarySim-AI [bold]{__version__}[/bold]")
+    console.print(
+        Text.assemble(
+            ("AdversarySim-AI ", "accent"),
+            (f"v{__version__}", "brand"),
+            ("   ", "muted"),
+            (CREDIT, "brand.dim"),
+        )
+    )
 
 
 def main() -> None:
@@ -475,7 +540,7 @@ def main() -> None:
     try:
         app()
     except SafetyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[danger]{exc}[/danger]")
         raise typer.Exit(code=130) from exc
 
 

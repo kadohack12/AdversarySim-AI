@@ -117,15 +117,24 @@ _ALLOWED_OS = tuple(_ALLOWED_FORMATS)
 # Default output format when the caller does not specify one.
 _DEFAULT_FORMAT = {"windows": "exe", "linux": "elf", "darwin": "macho"}
 
-# Strict allow-list of read-only host discovery commands (MITRE ATT&CK T1082 —
-# System Information Discovery). Only these exact commands may run on a target;
-# anything else is refused before it reaches the target.
+# Strict allow-list of read-only host discovery commands. Only these exact
+# commands may run on a target; anything else is refused before it reaches the
+# target. Grouped by MITRE ATT&CK technique:
+#   T1082 — System Information Discovery (whoami, id, uname, hostname, uptime)
+#   T1083 — File and Directory Discovery (pwd, ls, and a fixed canary read)
 DISCOVERY_COMMANDS: dict[str, str] = {
+    # T1082 — System Information Discovery
     "whoami": "whoami",
     "id": "id",
     "uname": "uname -a",
     "hostname": "hostname",
     "uptime": "uptime",
+    # T1083 — File and Directory Discovery. Paths are fixed literals, never
+    # operator- or model-supplied, so discovery cannot be aimed at arbitrary
+    # files on the target.
+    "pwd": "pwd",
+    "ls": "ls -la",
+    "canary": "cat /tmp/canary_data.txt",
 }
 
 # Accept both the short keys above and the literal command strings operators or
@@ -134,6 +143,11 @@ _DISCOVERY_ALIASES: dict[str, str] = {
     **{key: key for key in DISCOVERY_COMMANDS},
     **{value: key for key, value in DISCOVERY_COMMANDS.items()},
 }
+
+# A canary read is the one discovery command that varies: operators may seed
+# decoy files under /tmp/ (T1083). The directory is fixed and the file name must
+# match a strict pattern, so this can never be aimed at an arbitrary path.
+_CANARY_READ_RE = re.compile(r"^cat\s+/tmp/(canary_[A-Za-z0-9_]{1,64}\.txt)$")
 
 # Timeout for a single discovery command executed on a session.
 _DISCOVERY_TIMEOUT = 60
@@ -536,13 +550,39 @@ def sliver_generate_payload(
     return f"{header}\nClient output:\n{output}" if output else header
 
 
-def sliver_run_discovery(session_id: str, command: str) -> str:
-    """Run one read-only discovery command on a Sliver session (MITRE T1082).
+def _resolve_discovery_command(command: str) -> str | None:
+    """Resolve an operator/model-supplied discovery command to a safe literal.
 
-    This emulates **System Information Discovery** on an authorised target. To
-    keep the action defensible it accepts only a strict allow-list of read-only
-    commands (see :data:`DISCOVERY_COMMANDS`): ``whoami``, ``id``, ``uname -a``,
-    ``hostname`` and ``uptime``. Anything else is refused before any command
+    Returns the exact command string to run on the target, or ``None`` when the
+    request is not on the allow-list. Accepts the short keys in
+    :data:`DISCOVERY_COMMANDS`, their literal forms, and a canary read of any
+    ``/tmp/canary_*.txt`` file (MITRE T1083).
+    """
+    requested = str(command).strip()
+    key = _DISCOVERY_ALIASES.get(requested) or _DISCOVERY_ALIASES.get(requested.lower())
+    if key is not None:
+        return DISCOVERY_COMMANDS[key]
+
+    canary = _CANARY_READ_RE.match(requested)
+    if canary:
+        return f"cat /tmp/{canary.group(1)}"
+    return None
+
+
+def sliver_run_discovery(session_id: str, command: str) -> str:
+    """Run one read-only discovery command on a Sliver session.
+
+    This emulates a narrow slice of adversary discovery on an authorised target:
+
+    - **MITRE T1082 — System Information Discovery**: ``whoami``, ``id``,
+      ``uname -a``, ``hostname``, ``uptime``.
+    - **MITRE T1083 — File and Directory Discovery**: ``pwd``, ``ls -la`` and a
+      canary read (``cat /tmp/canary_*.txt``).
+
+    To keep the action defensible it accepts only a strict allow-list of
+    read-only commands (see :data:`DISCOVERY_COMMANDS`). Paths are fixed literals
+    — a canary read is confined to ``/tmp/canary_*.txt`` — so discovery can never
+    be aimed at arbitrary files. Anything else is refused before any command
     reaches the target.
 
     The command is dispatched through the Sliver session console as
@@ -553,7 +593,8 @@ def sliver_run_discovery(session_id: str, command: str) -> str:
     Args:
         session_id: The Sliver session to run the command on (id, name or index).
         command: One of the allow-listed discovery commands, either the short
-            key (``whoami``) or the literal command string (``uname -a``).
+            key (``whoami``, ``ls``, ``canary``) or the literal command string
+            (``uname -a``, ``ls -la``, ``cat /tmp/canary_data.txt``).
 
     Returns:
         str: The command that ran and the target's output, or a clear refusal or
@@ -569,12 +610,13 @@ def sliver_run_discovery(session_id: str, command: str) -> str:
             "letters, digits, underscore or hyphen."
         )
 
-    requested = str(command).strip()
-    key = _DISCOVERY_ALIASES.get(requested) or _DISCOVERY_ALIASES.get(requested.lower())
-    if key is None:
+    resolved = _resolve_discovery_command(command)
+    if resolved is None:
         allowed = ", ".join(sorted(DISCOVERY_COMMANDS))
-        return f"Refused: '{command}' is not an allowed discovery command. Allowed: {allowed}."
-    resolved = DISCOVERY_COMMANDS[key]
+        return (
+            f"Refused: '{command}' is not an allowed discovery command. "
+            f"Allowed: {allowed}, or cat /tmp/canary_*.txt."
+        )
 
     console_commands = [f"use {session}", resolved]
     try:
