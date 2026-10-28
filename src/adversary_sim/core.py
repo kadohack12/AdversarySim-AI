@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +29,7 @@ __all__ = [
     "ToolCall",
     "DEFAULT_SYSTEM_PROMPT",
     "TOOL_SCHEMAS",
+    "parse_tool_calls_from_text",
 ]
 
 DEFAULT_HOST = "http://127.0.0.1:11434"
@@ -142,6 +144,105 @@ class ChatReply:
         return bool(self.tool_calls)
 
 
+# Matches a JSON object literal in free text; used to recover tool calls that a
+# model emits as raw content instead of the structured ``tool_calls`` field.
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+# Keys a model might use to name the tool it wants to call.
+_TOOL_NAME_KEYS = ("name", "tool", "tool_name", "function", "action")
+
+
+def _coerce_tool_call(obj: Any) -> ToolCall | None:
+    """Best-effort conversion of a parsed JSON object into a :class:`ToolCall`.
+
+    Accepts the common shapes models emit, e.g.::
+
+        {"name": "sliver_list_beacons", "arguments": {}}
+        {"tool": "sliver_list_beacons"}
+        {"function": {"name": "sliver_list_beacons", "arguments": {...}}}
+        {"type": "function", "function": {"name": "..."}}
+
+    Returns None when no usable tool name is found.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    # Nested {"function": {"name": ...}} shape.
+    function = obj.get("function")
+    if isinstance(function, dict):
+        nested = _coerce_tool_call(function)
+        if nested is not None:
+            return nested
+        return None
+
+    name = ""
+    for key in _TOOL_NAME_KEYS:
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            name = value.strip()
+            break
+    if not name:
+        return None
+
+    arguments = obj.get("arguments") or obj.get("parameters") or obj.get("args") or {}
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return ToolCall(name=name, arguments=arguments)
+
+
+def parse_tool_calls_from_text(text: str) -> list[ToolCall]:
+    """Extract tool calls from free-form model text.
+
+    Some models — especially smaller local ones — emit a tool invocation as raw
+    JSON in the message ``content`` (e.g. ``{"name": "sliver_list_beacons",
+    "arguments": {}}``) instead of populating the structured ``tool_calls``
+    field. This recovers those calls so the CLI can still route them through the
+    Safety Gate.
+
+    Only objects that carry a recognised tool-name key are returned; ordinary
+    prose or unrelated JSON is ignored.
+
+    Args:
+        text: The model's raw content string.
+
+    Returns:
+        list[ToolCall]: Zero or more tool calls found in the text.
+    """
+    if not text or "{" not in text:
+        return []
+
+    calls: list[ToolCall] = []
+
+    # Prefer a whole-string parse (handles clean, well-formed JSON).
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if parsed is not None:
+            call = _coerce_tool_call(parsed)
+            if call is not None:
+                return [call]
+
+    # Fall back to scanning for embedded JSON objects.
+    for match in _JSON_OBJECT_RE.finditer(text):
+        candidate = match.group(0).strip()
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        call = _coerce_tool_call(parsed)
+        if call is not None:
+            calls.append(call)
+    return calls
+
+
 @dataclass
 class OllamaClient:
     """Minimal async client for the Ollama ``/api/chat`` endpoint.
@@ -215,6 +316,21 @@ class OllamaClient:
     def _extract_content(data: dict[str, Any]) -> str:
         message = data.get("message") or {}
         return str(message.get("content", ""))
+
+    @staticmethod
+    def _build_reply(data: dict[str, Any]) -> ChatReply:
+        """Build a :class:`ChatReply`, recovering text-embedded tool calls.
+
+        Prefers the structured ``tool_calls`` field; when the model instead
+        emits a tool call as raw JSON in ``content`` (a common quirk of smaller
+        local models), the call is recovered from the text so the CLI still
+        routes it through the Safety Gate.
+        """
+        content = OllamaClient._extract_content(data)
+        tool_calls = OllamaClient._extract_tool_calls(data)
+        if not tool_calls:
+            tool_calls = parse_tool_calls_from_text(content)
+        return ChatReply(content=content, tool_calls=tool_calls)
 
     @staticmethod
     def _extract_tool_calls(data: dict[str, Any]) -> list[ToolCall]:
@@ -307,11 +423,7 @@ class OllamaClient:
         except httpx.HTTPError as exc:
             raise OllamaError(f"Ollama chat request failed: {exc}") from exc
 
-        data = response.json()
-        return ChatReply(
-            content=self._extract_content(data),
-            tool_calls=self._extract_tool_calls(data),
-        )
+        return self._build_reply(response.json())
 
     async def continue_chat(
         self,
@@ -332,11 +444,7 @@ class OllamaClient:
         except httpx.HTTPError as exc:
             raise OllamaError(f"Ollama chat request failed: {exc}") from exc
 
-        data = response.json()
-        return ChatReply(
-            content=self._extract_content(data),
-            tool_calls=self._extract_tool_calls(data),
-        )
+        return self._build_reply(response.json())
 
     async def stream_chat(
         self, prompt: str, history: Iterable[ChatMessage] = ()

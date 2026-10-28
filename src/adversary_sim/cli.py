@@ -24,9 +24,11 @@ from .core import (
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     ChatMessage,
+    ChatReply,
     OllamaClient,
     OllamaError,
     ToolCall,
+    parse_tool_calls_from_text,
 )
 from .safety import Action, RiskLevel, SafetyError, confirm, screen_text
 
@@ -295,33 +297,61 @@ async def _converse(
 ) -> None:
     """Drive one operator turn, resolving any tool calls the model requests.
 
-    The model's requested tools are executed only after the operator approves
-    them through the Safety Gate; each result is fed back to the model so it can
-    synthesise a natural-language answer. Conversation state is appended to
-    *history* in place.
+    Tool calls are detected from both the structured ``tool_calls`` field and,
+    as a fallback, from raw JSON embedded in the message text (some local models
+    emit ``{"name": "sliver_list_beacons", "arguments": {}}`` as content). Every
+    detected call is routed through the Safety Gate before the Sliver function
+    runs; the real output is then fed back to the model, which synthesises the
+    final answer in natural language.
+
+    Conversation state is appended to *history* in place.
     """
     with console.status("Thinking…"):
         reply = await client.continue_chat(history)
 
     for _ in range(max_tool_rounds):
-        if not reply.wants_tools:
+        calls = _detect_tool_calls(reply)
+        if not calls:
             break
         history.append(
             ChatMessage(
                 "assistant",
                 reply.content,
-                tool_calls=[call.as_dict() for call in reply.tool_calls],
+                tool_calls=[call.as_dict() for call in calls],
             )
         )
-        for call in reply.tool_calls:
+        for call in calls:
             result = _execute_tool_call(call)
-            history.append(ChatMessage("tool", result, tool_name=call.name))
+            history.append(
+                ChatMessage("tool", _tool_result_message(call, result), tool_name=call.name)
+            )
         with console.status("Thinking…"):
             reply = await client.continue_chat(history)
 
     if reply.content:
         console.print(Markdown(reply.content))
     history.append(ChatMessage("assistant", reply.content))
+
+
+def _detect_tool_calls(reply: ChatReply) -> list[ToolCall]:
+    """Return the tool calls in *reply*, structured or embedded in text.
+
+    Prefers the structured ``tool_calls`` field; when that is empty it falls back
+    to parsing a JSON tool invocation out of the raw ``content`` string, so a
+    model that answers with ``{"name": "sliver_list_beacons", "arguments": {}}``
+    as plain text still triggers execution instead of being echoed back.
+    """
+    if reply.tool_calls:
+        return list(reply.tool_calls)
+    return parse_tool_calls_from_text(reply.content)
+
+
+def _tool_result_message(call: ToolCall, result: str) -> str:
+    """Format a tool result as context for the model's synthesis turn."""
+    return (
+        f"Résultat de l'outil {call.name} :\n{result}\n"
+        "Réponds maintenant à la question initiale de l'opérateur en français."
+    )
 
 
 def _execute_tool_call(call: ToolCall) -> str:

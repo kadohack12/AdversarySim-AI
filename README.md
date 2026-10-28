@@ -1,7 +1,7 @@
 # AdversarySim-AI
 
 ![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
-![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-102%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Zero Telemetry](https://img.shields.io/badge/telemetry-zero-blueviolet)
 
@@ -160,8 +160,11 @@ Through **Ollama tool calling**, the model can go further than narrating: when a
 question needs live data, it requests the matching read-only Sliver tool
 (`sliver_status`, `sliver_list_sessions`, `sliver_list_beacons`, `sliver_list_jobs`)
 by name. AdversarySim intercepts that request, runs it through the Safety Gate for
-`[Y/n]` approval, executes the Sliver function, and feeds the result back so the
-model can answer precisely:
+`[Y/n]` approval, executes the Sliver function, and feeds the real output back so
+the model can answer precisely. Detection is robust: it accepts both the
+structured `tool_calls` field and a tool invocation the model emits as raw JSON in
+its text (e.g. `{"name": "sliver_list_beacons", "arguments": {}}`), so the call is
+never merely echoed back:
 
 ```text
 adversarysim> Sur quelle machine se trouve mon implant ?

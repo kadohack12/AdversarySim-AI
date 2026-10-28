@@ -14,7 +14,13 @@ import httpx
 import pytest
 
 from adversary_sim import cli, sliver
-from adversary_sim.core import ChatMessage, OllamaClient, ToolCall
+from adversary_sim.core import (
+    ChatMessage,
+    ChatReply,
+    OllamaClient,
+    ToolCall,
+    parse_tool_calls_from_text,
+)
 
 
 def _client(handler) -> OllamaClient:
@@ -192,7 +198,7 @@ async def test_tool_call_respects_safety_gate_refusal(monkeypatch):
             return _tool_call_response("sliver_list_beacons")
         body = json.loads(request.content)
         tool_msgs = [m for m in body["messages"] if m["role"] == "tool"]
-        assert tool_msgs and tool_msgs[-1]["content"].startswith("Cancelled:")
+        assert tool_msgs and "Cancelled:" in tool_msgs[-1]["content"]
         return _text_response("Je n'ai pas pu consulter les beacons.")
 
     client = _client(handler)
@@ -230,3 +236,100 @@ def test_resolve_tool_only_returns_read_only_functions():
     assert cli._resolve_tool("sliver_list_beacons") is sliver.sliver_list_beacons
     assert cli._resolve_tool("sliver_generate_payload") is None
     assert cli._resolve_tool("rm -rf /") is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: model emits the tool call as raw JSON text (not message.tool_calls)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_tool_calls_from_text_recovers_bare_json():
+    calls = parse_tool_calls_from_text('{"name": "sliver_list_beacons", "arguments": {}}')
+    assert calls == [ToolCall(name="sliver_list_beacons", arguments={})]
+
+
+def test_parse_tool_calls_from_text_handles_common_shapes():
+    assert parse_tool_calls_from_text('{"tool": "sliver_status"}') == [
+        ToolCall(name="sliver_status", arguments={})
+    ]
+    nested = parse_tool_calls_from_text(
+        '{"type": "function", "function": {"name": "sliver_list_jobs", "arguments": {}}}'
+    )
+    assert nested == [ToolCall(name="sliver_list_jobs", arguments={})]
+    embedded = parse_tool_calls_from_text(
+        'Je vais vérifier. {"name": "sliver_list_beacons", "arguments": {}} Un instant.'
+    )
+    assert embedded == [ToolCall(name="sliver_list_beacons", arguments={})]
+
+
+def test_parse_tool_calls_from_text_ignores_plain_prose_and_data():
+    assert parse_tool_calls_from_text("Aucun implant actif sur le lab.") == []
+    assert parse_tool_calls_from_text('{"count": 3, "status": "ok"}') == []
+
+
+@pytest.mark.asyncio
+async def test_raw_json_text_tool_call_triggers_execution(monkeypatch):
+    """The reported bug: the model returns the tool call as raw JSON text.
+
+    Before the fix, ``_converse`` echoed the JSON back as text and never ran the
+    tool. This proves the fallback detects it, runs it through the Safety Gate,
+    and produces a final natural-language answer.
+    """
+    monkeypatch.setenv("ADVERSARYSIM_ASSUME_YES", "1")
+    monkeypatch.delenv("ADVERSARYSIM_DRY_RUN", raising=False)
+
+    called = {"beacons": 0}
+
+    def _beacons() -> str:
+        called["beacons"] += 1
+        return "Sliver beacons (1):\n  - ID=abc, Transport=mtls, Hostname=target-node"
+
+    monkeypatch.setattr(sliver, "sliver_list_beacons", _beacons)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Tool call delivered as plain text content, NOT in tool_calls.
+            return _text_response('{"name": "sliver_list_beacons", "arguments": {}}')
+        # Second turn must carry the real tool output back to the model.
+        tool_msgs = [m for m in body["messages"] if m["role"] == "tool"]
+        assert tool_msgs and tool_msgs[-1]["tool_name"] == "sliver_list_beacons"
+        assert "target-node" in tool_msgs[-1]["content"]
+        assert "Résultat de l'outil sliver_list_beacons" in tool_msgs[-1]["content"]
+        return _text_response("Ton implant tourne sur target-node.")
+
+    client = _client(handler)
+    history: list[ChatMessage] = [ChatMessage("user", "Sur quelle machine se trouve mon implant ?")]
+    await cli._converse(client, history)
+    await client.aclose()
+
+    # The tool actually ran (previously it never did).
+    assert called["beacons"] == 1
+    # The raw JSON was NOT echoed as the final answer.
+    assert history[-1].role == "assistant"
+    assert "target-node" in history[-1].content
+    assert '{"name"' not in history[-1].content
+    # A tool turn was recorded for the audit trail.
+    tool_turns = [m for m in history if m.role == "tool"]
+    assert tool_turns and tool_turns[0].tool_name == "sliver_list_beacons"
+
+
+def test_detect_tool_calls_prefers_structured_field():
+    structured = ChatReply(
+        content="",
+        tool_calls=[ToolCall(name="sliver_status", arguments={})],
+    )
+    assert cli._detect_tool_calls(structured) == [ToolCall(name="sliver_status", arguments={})]
+    # Fallback path when the structured field is empty.
+    as_text = ChatReply(content='{"name": "sliver_list_jobs"}')
+    assert cli._detect_tool_calls(as_text) == [ToolCall(name="sliver_list_jobs", arguments={})]
+
+
+def test_tool_result_message_format():
+    msg = cli._tool_result_message(ToolCall(name="sliver_list_beacons"), "Sliver beacons (1):")
+    assert "Résultat de l'outil sliver_list_beacons" in msg
+    assert "Sliver beacons (1):" in msg
+    assert "en français" in msg
